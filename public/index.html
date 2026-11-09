@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1b2340">
+<title>軽音楽部 部室シフト</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo"></span><div><h1 id="appTitle">部室シフト</h1><small id="who">読み込み中…</small></div></div>
+  <button id="logoutBtn" class="ghost small hidden">ログアウト</button>
+</header>
+<div id="busy" class="busy hidden"></div>
+<div id="configError" class="banner error hidden">初期設定が未完了です。public/config.js に Apps Script のURLを貼ってください。</div>
+
+<main id="app">
+  <!-- ログイン前 -->
+  <section id="authView" class="hidden">
+    <div class="segment" id="authTabs">
+      <button data-auth="login" class="on">ログイン</button>
+      <button data-auth="register">新規登録</button>
+      <button data-auth="admin">管理者</button>
+    </div>
+    <form class="card" id="loginForm" autocomplete="on">
+      <h2>バンドでログイン</h2>
+      <label for="loginName">バンド名</label>
+      <input id="loginName" name="username" autocomplete="username" maxlength="40" required>
+      <label for="loginPw">パスワード</label>
+      <input id="loginPw" type="password" name="password" autocomplete="current-password" required>
+      <button type="submit" class="primary wide">ログイン</button>
+      <p class="hint">パスワードを忘れたら、管理者にリセットしてもらってください。</p>
+    </form>
+    <form class="card hidden" id="registerForm">
+      <h2>バンドを新規登録</h2>
+      <p class="hint">バンドごとに1アカウント。掛け持ちの人はバンドごとに別に作ります。</p>
+      <label for="regName">バンド名（あとから管理者が変更できます）</label>
+      <input id="regName" name="username" autocomplete="username" maxlength="40" required>
+      <label for="regPw">パスワード（8文字以上・バンド内で共有）</label>
+      <input id="regPw" type="password" name="new-password" autocomplete="new-password" minlength="8" required>
+      <label for="regPw2">パスワード（確認）</label>
+      <input id="regPw2" type="password" autocomplete="new-password" minlength="8" required>
+      <label for="regPhrase">部の合言葉</label>
+      <input id="regPhrase" autocomplete="off" required>
+      <button type="submit" class="primary wide">登録する</button>
+    </form>
+    <form class="card hidden" id="adminForm">
+      <h2>管理者ログイン</h2>
+      <label for="adminPw">管理者パスワード</label>
+      <input id="adminPw" type="password" autocomplete="current-password" required>
+      <button type="submit" class="primary wide">ログイン</button>
+    </form>
+  </section>
+
+  <!-- ログイン後 -->
+  <section id="mainView" class="hidden">
+    <nav class="tabs" id="tabs"></nav>
+    <div id="page"></div>
+  </section>
+</main>
+<div id="toast" class="toast hidden"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
