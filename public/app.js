@@ -6,6 +6,8 @@ const CFG = window.APP_CONFIG || {};
 const $ = id => document.getElementById(id);
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
 const PJ = { first: '前半', second: '後半' };
+const MEMBER_WEEK_START = 1; // 部員のカレンダー：1=月曜始まり
+const ADMIN_WEEK_START = 1;  // 管理者のカレンダー：1=月曜始まり（0=日曜, 6=土曜）
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ---------- 保存（ブラウザ） ---------- */
@@ -14,17 +16,38 @@ const store = {
   set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
 };
 
+/* ---------- アカウント（複数ログイン） ---------- */
+const ACC = {
+  list: (() => { try { return JSON.parse(store.get('cs_accounts') || '[]'); } catch (e) { return []; } })(),
+  active: Number(store.get('cs_active') || 0),
+  save() { store.set('cs_accounts', JSON.stringify(this.list)); store.set('cs_active', String(this.active)); },
+  cur() { return this.list[this.active] || null; },
+  keyOf(me) { return me.role === 'admin' ? 'a:' + me.admin.id : 'b:' + me.band.id; },
+  add(token, me) {
+    const k = this.keyOf(me), i = this.list.findIndex(a => this.keyOf(a.me) === k);
+    if (i >= 0) { this.list[i] = { token, me }; this.active = i; } else { this.list.push({ token, me }); this.active = this.list.length - 1; }
+    this.save();
+  },
+  removeCur() { this.list.splice(this.active, 1); this.active = 0; this.save(); },
+  bandIds() { return this.list.filter(a => a.me.role === 'band').map(a => a.me.band.id); },
+  label(me) { return me.role === 'admin' ? '管理者：' + me.admin.name : me.band.name; },
+};
+// 旧バージョンの保存データを引き継ぐ
+if (!ACC.list.length && store.get('cs_token')) { ACC.list = [{ token: store.get('cs_token'), me: null }]; ACC.active = 0; store.set('cs_token', null); }
+
 /* ---------- 状態 ---------- */
 const S = {
-  token: store.get('cs_token'),
-  me: null,
+  get token() { const c = ACC.cur(); return c ? c.token : null; },
+  get me() { const c = ACC.cur(); return c ? c.me : null; },
+  adding: false,
   tab: 'shift',
   month: { shift: ym(new Date()), request: nextMonth(ym(new Date())), admin: nextMonth(ym(new Date())) },
   onlyMine: store.get('cs_onlyMine') === '1',
-  req: null,       // 希望提出の編集中データ {month, list:[], saved:[], dirty}
+  req: null,
   adminOpen: { prep: true },
   editBand: null,
 };
+function setToken(t) { const c = ACC.cur(); if (c) { c.token = t; ACC.save(); } }
 
 /* ---------- 日付 ---------- */
 function ym(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
@@ -35,9 +58,40 @@ function dayInfo(day) { const [y, m, d] = day.split('-').map(Number); const w = 
 function daysOf(m) { const [y, mo] = m.split('-').map(Number); const n = new Date(y, mo, 0).getDate(); const a = []; for (let i = 1; i <= n; i++) a.push(m + '-' + String(i).padStart(2, '0')); return a; }
 function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return y + '年' + mo + '月'; }
 function fmtDT(s) { if (!s) return ''; const [d, t] = s.split('T'); const i = dayInfo(d); return Number(d.slice(5, 7)) + '/' + i.d + '(' + i.wd + ') ' + (t || ''); }
-function timeOf(info, p) { const t = info.times; return p === 'first' ? t.p1start + '〜' + t.p1end : t.p2start + '〜' + t.p2end; }
-function slotText(slot, info) { const [d, p] = slot.split('|'); const i = dayInfo(d); return Number(d.slice(5, 7)) + '/' + i.d + '(' + i.wd + ') ' + PJ[p] + (info ? ' ' + timeOf(info, p) : ''); }
 function dayLabel(day) { const i = dayInfo(day); const cls = i.w === 6 ? 'sat' : i.w === 0 ? 'sun' : ''; return `<div class="dlabel ${cls} ${day === today() ? 'today' : ''}"><b>${i.d}</b><span>${i.wd}</span></div>`; }
+/** 締切までの残り時間（例：あと3日 / あと5時間） */
+function remain(deadline) {
+  if (!deadline) return null;
+  const [d, t] = deadline.split('T'); const [y, m, dd] = d.split('-').map(Number); const [h, mi] = t.split(':').map(Number);
+  const ms = new Date(y, m - 1, dd, h, mi) - new Date();
+  if (ms <= 0) return { text: '締切を過ぎました', soon: true };
+  const hours = ms / 3600000;
+  return { text: hours < 24 ? 'あと' + Math.max(1, Math.floor(hours)) + '時間' : 'あと' + Math.floor(hours / 24) + '日', soon: hours < 72 };
+}
+function remainHtml(deadline) { const r = remain(deadline); return r ? `<span class="${r.soon ? 'due' : ''}">（${r.text}）</span>` : ''; }
+
+/* 枠の時刻：その日に個別の時刻があればそれ、なければ月の基本時刻 */
+function timesFor(d, day) { const s = (d.slots || []).find(x => x.day === day); return (s && s.t) || d.info.times; }
+function timeStr(t, p) { return p === 'first' ? t.p1start + '〜' + t.p1end : t.p2start + '〜' + t.p2end; }
+function slotText(slot, d) { const [day, p] = slot.split('|'); const i = dayInfo(day); return Number(day.slice(5, 7)) + '/' + i.d + '(' + i.wd + ') ' + PJ[p] + (d ? ' ' + timeStr(timesFor(d, day), p) : ''); }
+
+/* カレンダー（startDow：週の始まりの曜日） */
+function calendar(m, startDow, cellFn) {
+  const days = daysOf(m), first = dayInfo(days[0]).w, lead = (first - startDow + 7) % 7;
+  let h = '<div class="cal">';
+  for (let i = 0; i < 7; i++) { const w = (startDow + i) % 7; h += `<div class="wh ${w === 6 ? 'sat' : w === 0 ? 'sun' : ''}">${WD[w]}</div>`; }
+  for (let i = 0; i < lead; i++) h += '<div class="c blank"></div>';
+  days.forEach(day => {
+    const w = dayInfo(day).w, c = cellFn(day) || {};
+    h += `<div class="c ${w === 6 ? 'sat' : w === 0 ? 'sun' : ''} ${day === today() ? 'today' : ''} ${c.cls || ''}" data-cal="${day}"><span class="n">${dayInfo(day).d}</span>${c.html || ''}</div>`;
+  });
+  return h + '</div>';
+}
+function jumpTo(id) {
+  const el = document.getElementById(id); if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
 
 /* ---------- 通信 ---------- */
 let busyN = 0;
@@ -49,11 +103,15 @@ async function api(action, body = {}, opt = {}) {
     const res = await fetch(CFG.API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ action, token: S.token }, body)),
+      body: JSON.stringify(Object.assign({ action, token: opt.token !== undefined ? opt.token : S.token }, body)),
     });
     const j = await res.json();
     if (!j.ok) {
-      if (j.code === 'AUTH') { setToken(null); S.me = null; render(); }
+      if (j.code === 'AUTH' && opt.token === undefined && ACC.cur()) {
+        const name = ACC.cur().me ? ACC.label(ACC.cur().me) : '';
+        ACC.removeCur(); S.req = null; render();
+        throw new Error((name ? name + ' の' : '') + 'ログインが切れました。もう一度ログインしてください');
+      }
       throw new Error(j.error || 'エラーが起きました');
     }
     return j.data;
@@ -63,8 +121,6 @@ async function api(action, body = {}, opt = {}) {
     throw e;
   } finally { busy(false); }
 }
-
-function setToken(t) { S.token = t; store.set('cs_token', t); }
 
 let toastT = 0;
 function toast(msg, isErr) {
@@ -83,36 +139,78 @@ async function boot() {
     return;
   }
   bindAuth();
-  $('logoutBtn').onclick = () => { if (!confirmLeave()) return; setToken(null); S.me = null; S.req = null; render(); toast('ログアウトしました'); };
+  bindAccountSheet();
   window.addEventListener('beforeunload', e => { if (S.req && S.req.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  if (S.token) {
-    try { S.me = await api('me', {}, { silent: true }); } catch (e) { S.me = null; }
-  }
+  await verifyCurrent();
   render();
 }
 
+/** 今のアカウントがまだ有効か確認（無効なら外して次へ） */
+async function verifyCurrent() {
+  while (ACC.cur()) {
+    try { const me = await api('me', {}, { silent: true, token: S.token }); ACC.cur().me = me; ACC.save(); return true; }
+    catch (e) { if (/通信できません/.test(e.message)) return !!ACC.cur().me; ACC.removeCur(); }
+  }
+  return false;
+}
+
 function render() {
-  const logged = !!S.me;
+  const logged = !!S.me && !S.adding;
   $('authView').classList.toggle('hidden', logged);
   $('mainView').classList.toggle('hidden', !logged);
-  $('logoutBtn').classList.toggle('hidden', !logged);
-  $('who').textContent = !logged ? '未ログイン' : S.me.role === 'admin' ? '管理者：' + S.me.admin.name : S.me.band.name;
+  $('acctBtn').classList.toggle('hidden', !S.me);
+  $('authBack').classList.toggle('hidden', !(S.adding && S.me));
+  $('who').textContent = !S.me ? '未ログイン' : ACC.label(S.me) + (ACC.list.length > 1 ? `（${ACC.list.length}アカウント）` : '');
   if (!logged) return;
   const tabs = S.me.role === 'admin'
     ? [['shift', '📅', 'シフト'], ['admin', '🛠', '管理'], ['account', '👤', 'アカウント']]
     : [['shift', '📅', 'シフト'], ['request', '✋', '希望提出'], ['account', '👤', 'アカウント']];
   if (!tabs.some(t => t[0] === S.tab)) S.tab = 'shift';
   $('tabs').innerHTML = tabs.map(t => `<button data-tab="${t[0]}" class="${S.tab === t[0] ? 'on' : ''}"><span class="ic">${t[1]}</span>${t[2]}</button>`).join('');
-  $('tabs').querySelectorAll('button').forEach(b => b.onclick = () => { if (b.dataset.tab !== 'request' && S.tab === 'request' && !confirmLeave()) return; S.tab = b.dataset.tab; render(); window.scrollTo(0, 0); });
+  $('tabs').querySelectorAll('button').forEach(b => b.onclick = () => goTab(b.dataset.tab));
   ({ shift: pageShift, request: pageRequest, account: pageAccount, admin: pageAdmin })[S.tab]();
+}
+function goTab(tab) {
+  if (S.tab === 'request' && tab !== 'request' && !confirmLeave()) return;
+  S.tab = tab; render(); window.scrollTo(0, 0);
 }
 
 function confirmLeave() {
   if (S.req && S.req.dirty) {
     if (!confirm('希望がまだ保存されていません。保存せずに移動しますか？')) return false;
-    S.req = null;
   }
+  S.req = null;
   return true;
+}
+
+/* ---------- アカウント切り替え ---------- */
+function bindAccountSheet() {
+  $('acctBtn').onclick = openSheet;
+  $('acctClose').onclick = closeSheet;
+  $('acctSheet').onclick = e => { if (e.target === $('acctSheet')) closeSheet(); };
+  $('acctAdd').onclick = () => { closeSheet(); S.adding = true; render(); document.querySelector('[data-auth=login]').click(); window.scrollTo(0, 0); };
+  $('authBack').onclick = () => { S.adding = false; render(); };
+  $('acctLogout').onclick = () => {
+    if (!confirmLeave()) return;
+    const name = ACC.label(S.me);
+    ACC.removeCur(); closeSheet(); S.tab = 'shift';
+    toast(name + ' からログアウトしました');
+    verifyCurrent().then(render);
+  };
+}
+function openSheet() {
+  $('acctList').innerHTML = ACC.list.map((a, i) => a.me ? `<li style="border:0;padding:0"><button class="acct ${i === ACC.active ? 'on' : ''}" data-acc="${i}"><span>${a.me.role === 'admin' ? '🛠' : '🎸'}</span><span>${esc(ACC.label(a.me))}<small>${i === ACC.active ? '使用中' : 'タップで切り替え'}</small></span></button></li>` : '').join('');
+  $('acctList').querySelectorAll('[data-acc]').forEach(b => b.onclick = () => switchTo(Number(b.dataset.acc)));
+  $('acctSheet').classList.remove('hidden');
+}
+function closeSheet() { $('acctSheet').classList.add('hidden'); }
+async function switchTo(i) {
+  if (i === ACC.active) return closeSheet();
+  if (!confirmLeave()) return;
+  ACC.active = i; ACC.save(); closeSheet();
+  await verifyCurrent();
+  render();
+  if (S.me) toast(ACC.label(S.me) + ' に切り替えました');
 }
 
 /* ---------- ログイン・登録 ---------- */
@@ -124,26 +222,28 @@ function bindAuth() {
   });
   $('loginForm').onsubmit = async e => {
     e.preventDefault();
-    try { const r = await api('login', { name: $('loginName').value, password: $('loginPw').value }); loggedIn(r); } catch (_) {}
+    try { const r = await api('login', { name: $('loginName').value, password: $('loginPw').value }, { token: null }); loggedIn(r); } catch (_) {}
   };
   $('registerForm').onsubmit = async e => {
     e.preventDefault();
     if ($('regPw').value !== $('regPw2').value) return toast('確認用パスワードが一致しません', true);
     if ($('regPw').value.length < 8) return toast('パスワードは8文字以上にしてください', true);
     try {
-      const r = await api('register', { name: $('regName').value, password: $('regPw').value, passphrase: $('regPhrase').value });
+      const r = await api('register', { name: $('regName').value, password: $('regPw').value, passphrase: $('regPhrase').value }, { token: null });
       loggedIn(r); toast('登録しました。パスワードはバンドの人と共有しておいてね');
     } catch (_) {}
   };
   $('adminForm').onsubmit = async e => {
     e.preventDefault();
-    try { const r = await api('adminLogin', { name: $('adminName').value, password: $('adminPw').value }); loggedIn(r); } catch (_) {}
+    try { const r = await api('adminLogin', { name: $('adminName').value, password: $('adminPw').value }, { token: null }); loggedIn(r); } catch (_) {}
   };
 }
 function loggedIn(r) {
-  setToken(r.token); S.me = r.me; S.tab = 'shift';
-  ['loginPw', 'regPw', 'regPw2', 'adminPw'].forEach(id => $(id).value = '');
+  if (!confirmLeave()) return;
+  ACC.add(r.token, r.me); S.adding = false; S.tab = 'shift';
+  ['loginName', 'loginPw', 'regName', 'regPw', 'regPw2', 'regPhrase', 'adminName', 'adminPw'].forEach(id => $(id).value = '');
   render();
+  if (ACC.list.length > 1) toast(ACC.label(r.me) + ' でログインしました。右上の「👥 切替」で切り替えられます');
 }
 
 function monthBar(key, extra = '') {
@@ -160,6 +260,13 @@ function statusPill(info) {
   const cls = { '準備中': '', '受付中': 'blue', '締切': 'warn', '確定': 'ok' }[info.status] || '';
   return `<span class="pill ${cls}">${esc(info.status)}</span>`;
 }
+/** 掛け持ち用：バンドアカウントの切り替えチップ */
+function bandChips() {
+  const bands = ACC.list.map((a, i) => ({ a, i })).filter(x => x.a.me && x.a.me.role === 'band');
+  if (bands.length < 2) return '';
+  return `<div class="bandchips">${bands.map(x => `<button data-chip="${x.i}" class="${x.i === ACC.active ? 'on' : ''}">${esc(x.a.me.band.name)}</button>`).join('')}</div>`;
+}
+function bindChips() { document.querySelectorAll('[data-chip]').forEach(b => b.onclick = () => switchTo(Number(b.dataset.chip))); }
 
 /* ---------- シフト ---------- */
 async function pageShift() {
@@ -169,46 +276,66 @@ async function pageShift() {
   let d;
   try { d = await api('month', { month: m }); } catch (e) { $('page').innerHTML = monthBar('shift') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('shift', pageShift); return; }
   if (S.tab !== 'shift' || S.month.shift !== m) return;
-  const myId = S.me.band && S.me.band.id;
+  const mineIds = new Set(ACC.bandIds());
+  const isMine = x => x && mineIds.has(x.bandId);
+  const multi = mineIds.size > 1;
   const conf = {};
   d.confirmed.forEach(x => conf[x.day + '|' + x.period] = x);
+  const slotMap = {}; d.slots.forEach(s => slotMap[s.day] = s);
   let html = monthBar('shift');
+  // 締切リマインド
+  (d.openMonths || []).forEach(o => {
+    if (!o.submitted) html += `<div class="alert"><span><b>${monthLabel(o.month)}の希望をまだ出していません</b>締切 ${esc(fmtDT(o.deadline) || '未定')} ${remainHtml(o.deadline)}</span><button class="small" data-goreq="${o.month}">今すぐ出す</button></div>`;
+    else html += `<div class="banner ok">${monthLabel(o.month)}の希望：提出済み（締切 ${esc(fmtDT(o.deadline) || '未定')}まで変更できます）</div>`;
+  });
   if (!d.confirmed.length) {
     const msg = d.info.status === '受付中' ? `希望を受付中です（締切 ${fmtDT(d.info.deadline) || '未定'}）` : d.info.status === '締切' ? '締め切りました。管理者が割り当て中です' : 'この月のシフトはまだありません';
     html += `<div class="banner info">${statusPill(d.info)} ${esc(msg)}</div>`;
   }
-  if (myId) {
-    const mine = d.confirmed.filter(x => x.bandId === myId);
+  if (mineIds.size) {
+    const mine = d.confirmed.filter(isMine);
     const up = mine.filter(x => x.day >= today());
     if (up.length) {
       const n = up[0];
-      html += `<div class="card next"><small>次の練習</small><b>${esc(slotText(n.day + '|' + n.period, d.info))}</b><small>今月の割り当て：${mine.length}枠</small></div>`;
+      html += `<div class="card next"><small>次の練習${multi ? '（' + esc(n.band) + '）' : ''}</small><b>${esc(slotText(n.day + '|' + n.period, d))}</b><small>今月の割り当て：${mine.length}枠</small></div>`;
     } else if (mine.length) {
       html += `<div class="banner ok">今月の割り当て：${mine.length}枠</div>`;
     }
-    if (d.confirmed.length) html += `<label class="toggle"><input type="checkbox" id="onlyMine" ${S.onlyMine ? 'checked' : ''}> 自分のバンドだけ表示</label>`;
   }
-  const slotMap = {}; d.slots.forEach(s => slotMap[s.day] = s);
+  // カレンダー（月曜始まり）
+  if (d.slots.length || d.confirmed.length) {
+    html += calendar(m, MEMBER_WEEK_START, day => {
+      const s = slotMap[day];
+      const bar = p => { const x = conf[day + '|' + p]; const open = s && s[p]; return `<span class="bar ${isMine(x) ? 'mine' : x ? 'taken' : open ? 'free' : 'x'}"></span>`; };
+      const closed = !(s && (s.first || s.second)) && !conf[day + '|first'] && !conf[day + '|second'];
+      return { cls: closed ? 'closed' : '', html: closed ? '' : `<span class="bars">${bar('first')}${bar('second')}</span>${s && s.t ? '<span class="badge">⏰</span>' : ''}` };
+    });
+    html += `<div class="legend"><span><i style="background:var(--accent)"></i>自分</span><span><i style="background:#9aa3b8"></i>他のバンド</span><span><i style="background:#cfe9db"></i>空き</span><span>⏰ 時間が違う日</span><span>上＝前半・下＝後半</span></div>`;
+  }
+  if (mineIds.size && d.confirmed.length) html += `<label class="toggle"><input type="checkbox" id="onlyMine" ${S.onlyMine ? 'checked' : ''}> 自分のバンドだけ表示</label>`;
   const rows = [];
   daysOf(m).forEach(day => {
     const s = slotMap[day];
     const a = conf[day + '|first'], b = conf[day + '|second'];
     if (!s && !a && !b) return;
-    if (S.onlyMine && myId && !((a && a.bandId === myId) || (b && b.bandId === myId))) return;
+    if (S.onlyMine && mineIds.size && !(isMine(a) || isMine(b))) return;
     if (s && !s.first && !s.second && !a && !b) {
-      if (!S.onlyMine) rows.push(`<div class="dayrow">${dayLabel(day)}<div class="cell closed" style="grid-column:span 2"><div class="bn">利用不可</div></div></div>`);
+      if (!S.onlyMine) rows.push(`<div class="dayrow" id="row-${day}">${dayLabel(day)}<div class="cell closed" style="grid-column:span 2"><div class="bn">利用不可</div></div></div>`);
       return;
     }
+    const t = timesFor(d, day);
     const cell = (p, x, open) => {
-      if (x) return `<div class="cell ${x.bandId === myId ? 'mine' : ''}"><div class="pt">${PJ[p]} ${timeOf(d.info, p)}</div><div class="bn">${esc(x.band)}</div></div>`;
+      if (x) return `<div class="cell ${isMine(x) ? 'mine' : ''}"><div class="pt">${PJ[p]} ${timeStr(t, p)}</div><div class="bn">${esc(x.band)}</div></div>`;
       if (!open) return `<div class="cell closed"><div class="pt">${PJ[p]}</div><div class="bn">利用不可</div></div>`;
-      return `<div class="cell empty"><div class="pt">${PJ[p]} ${timeOf(d.info, p)}</div><div class="bn">${d.confirmed.length ? '空き' : '—'}</div></div>`;
+      return `<div class="cell empty"><div class="pt">${PJ[p]} ${timeStr(t, p)}</div><div class="bn">${d.confirmed.length ? '空き' : '—'}</div></div>`;
     };
-    rows.push(`<div class="dayrow">${dayLabel(day)}${cell('first', a, s && s.first)}${cell('second', b, s && s.second)}</div>`);
+    rows.push(`<div class="dayrow" id="row-${day}">${dayLabel(day)}${cell('first', a, s && s.first)}${cell('second', b, s && s.second)}</div>`);
   });
   html += rows.length ? `<div class="days">${rows.join('')}</div>` : `<p class="empty">${S.onlyMine ? 'この月の割り当てはありません' : '利用枠がまだ設定されていません'}</p>`;
   $('page').innerHTML = html;
   bindMonthBar('shift', pageShift);
+  document.querySelectorAll('[data-cal]').forEach(c => c.onclick = () => jumpTo('row-' + c.dataset.cal));
+  document.querySelectorAll('[data-goreq]').forEach(b => b.onclick = () => { S.month.request = b.dataset.goreq; S.req = null; goTab('request'); });
   const om = $('onlyMine');
   if (om) om.onchange = () => { S.onlyMine = om.checked; store.set('cs_onlyMine', om.checked ? '1' : null); pageShift(); };
 }
@@ -216,58 +343,70 @@ async function pageShift() {
 /* ---------- 希望提出 ---------- */
 async function pageRequest() {
   const m = S.month.request;
-  if (!S.req || S.req.month !== m) {
-    $('page').innerHTML = monthBar('request') + '<p class="empty">読み込み中…</p>';
-    bindMonthBar('request', pageRequest);
+  if (!S.req || S.req.month !== m || S.req.acc !== ACC.active) {
+    $('page').innerHTML = bandChips() + monthBar('request') + '<p class="empty">読み込み中…</p>';
+    bindMonthBar('request', pageRequest); bindChips();
     let d;
     try { d = await api('month', { month: m }); } catch (e) { $('page').innerHTML = monthBar('request') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('request', pageRequest); return; }
     if (S.tab !== 'request' || S.month.request !== m) return;
-    S.req = { month: m, data: d, list: d.myRequests.slice(), saved: d.myRequests.slice(), dirty: false, updated: d.myUpdated };
+    S.req = { month: m, acc: ACC.active, data: d, list: d.myRequests.slice(), saved: d.myRequests.slice(), dirty: false, updated: d.myUpdated };
   }
   drawRequest();
 }
 
-function drawRequest() {
+function drawRequest(scrollTo) {
   const R = S.req, d = R.data, info = d.info;
   const open = new Set(); d.slots.forEach(s => { if (s.first) open.add(s.day + '|first'); if (s.second) open.add(s.day + '|second'); });
-  let html = monthBar('request');
+  let html = bandChips();
+  if (html) html += `<p class="hint" style="margin:-6px 0 10px">今は <b>${esc(S.me.band.name)}</b> として提出します</p>`;
+  html += monthBar('request');
   if (info.accepting) {
-    html += `<div class="banner info">${statusPill(info)} 締切：<b>${esc(fmtDT(info.deadline) || '未定')}</b></div>`;
+    html += `<div class="banner info">${statusPill(info)} 締切：<b>${esc(fmtDT(info.deadline) || '未定')}</b> ${remainHtml(info.deadline)}</div>`;
   } else {
     const why = { '準備中': 'まだ受付が始まっていません', '締切': '受付は締め切られました', '確定': 'シフトは確定済みです' }[info.status] || '';
     html += `<div class="banner warn">${statusPill(info)} ${esc(why)}</div>`;
   }
-  // 自分の希望リスト
-  html += `<div class="card"><h2>あなたの希望（${R.list.length}件）</h2>`;
+  html += `<div class="card"><h2>${esc(S.me.band.name)} の希望（${R.list.length}件）</h2>`;
   if (R.list.length) {
     html += '<ol class="ranklist">' + R.list.map((s, i) => {
       const bad = !open.has(s);
-      return `<li><span class="no">${i + 1}</span><span class="tx">${esc(slotText(s, info))}${bad ? '<small style="color:var(--ng)">この枠は利用不可になりました</small>' : ''}</span>` +
+      return `<li><span class="no">${i + 1}</span><span class="tx">${esc(slotText(s, d))}${bad ? '<small style="color:var(--ng)">この枠は利用不可になりました</small>' : ''}</span>` +
         (info.accepting ? `<button class="small" data-up="${i}" ${i === 0 ? 'disabled' : ''} aria-label="上へ">↑</button><button class="small" data-down="${i}" ${i === R.list.length - 1 ? 'disabled' : ''} aria-label="下へ">↓</button><button class="small danger" data-del="${i}" aria-label="削除">✕</button>` : '') + '</li>';
     }).join('') + '</ol>';
   } else {
-    html += `<p class="hint">${info.accepting ? '下の枠をタップすると、希望順に追加されます。候補が多いほど割り当てられやすくなります。' : '希望は出ていません。'}</p>`;
+    html += `<p class="hint">${info.accepting ? 'カレンダーか下の一覧で枠をタップすると、希望順に追加されます。候補が多いほど割り当てられやすくなります。' : '希望は出ていません。'}</p>`;
   }
   if (R.updated && !R.dirty) html += `<p class="hint">最終保存：${esc(fmtDT(R.updated))}</p>`;
   html += '</div>';
-  // 枠の選択
   if (info.accepting) {
-    html += `<div class="card"><h2>枠を選ぶ</h2><p class="hint" style="margin:0 0 10px">タップで追加・もう一度タップで外す。番号は希望順位です。</p>`;
     const slotMap = {}; d.slots.forEach(s => slotMap[s.day] = s);
+    html += `<div class="card"><h2>枠を選ぶ</h2>`;
+    html += calendar(R.month, MEMBER_WEEK_START, day => {
+      const s = slotMap[day];
+      if (!s || !(s.first || s.second)) return { cls: 'closed' };
+      const bar = p => `<span class="bar ${R.list.includes(day + '|' + p) ? 'pick' : s[p] ? 'free' : 'x'}"></span>`;
+      const ranks = ['first', 'second'].map(p => R.list.indexOf(day + '|' + p)).filter(i => i >= 0).map(i => i + 1);
+      return { html: `<span class="bars">${bar('first')}${bar('second')}</span>${ranks.length ? `<span class="rk">${ranks.join(',')}</span>` : ''}${s.t ? '<span class="badge">⏰</span>' : ''}` };
+    });
+    html += `<p class="hint" style="margin:0 0 10px">日付をタップするとその日に移動します。下の一覧で前半・後半をタップ（もう一度タップで外す）。</p>`;
     const rows = daysOf(R.month).filter(day => slotMap[day] && (slotMap[day].first || slotMap[day].second)).map(day => {
+      const t = timesFor(d, day);
       const btn = p => {
         const id = day + '|' + p, idx = R.list.indexOf(id);
         if (!open.has(id)) return `<button disabled>${PJ[p]}<small>利用不可</small></button>`;
-        return `<button data-pick="${id}" class="${idx >= 0 ? 'sel' : ''}">${idx >= 0 ? '第' + (idx + 1) + '希望' : PJ[p]}<small>${timeOf(info, p)}</small></button>`;
+        return `<button data-pick="${id}" class="${idx >= 0 ? 'sel' : ''}">${idx >= 0 ? '第' + (idx + 1) + '希望' : PJ[p]}<small>${timeStr(t, p)}</small></button>`;
       };
-      return `<div class="pick">${dayLabel(day)}${btn('first')}${btn('second')}</div>`;
+      return `<div class="pick" id="pick-${day}">${dayLabel(day)}${btn('first')}${btn('second')}</div>`;
     });
     html += rows.length ? rows.join('') : '<p class="empty">利用できる枠がありません</p>';
     html += '</div>';
     html += `<div class="savebar"><button id="saveReq" class="${R.dirty ? 'accent' : 'primary'}" ${R.dirty ? '' : 'disabled'}>${R.dirty ? '⚠ 未保存：タップして保存（' + R.list.length + '件）' : '保存済み'}</button></div>`;
   }
+  const y = window.scrollY;
   $('page').innerHTML = html;
-  bindMonthBar('request', pageRequest);
+  window.scrollTo(0, y);
+  bindMonthBar('request', pageRequest); bindChips();
+  document.querySelectorAll('[data-cal]').forEach(c => c.onclick = () => jumpTo('pick-' + c.dataset.cal));
   const change = fn => { fn(); R.dirty = JSON.stringify(R.list) !== JSON.stringify(R.saved); drawRequest(); };
   document.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => change(() => {
     const id = b.dataset.pick, i = R.list.indexOf(id);
@@ -284,16 +423,16 @@ function drawRequest() {
     try {
       const r = await api('saveRequests', { month: R.month, slots: R.list });
       R.saved = R.list.slice(); R.dirty = false; R.updated = r.updated;
-      toast(r.saved ? '希望を保存しました（' + r.saved + '件）' : '希望を取り下げました');
+      toast(r.saved ? S.me.band.name + ' の希望を保存しました（' + r.saved + '件）' : '希望を取り下げました');
     } catch (e) {}
     drawRequest();
   };
 }
 
-/* ---------- アカウント（バンド） ---------- */
+/* ---------- アカウント ---------- */
 function pageAccount() {
   const isAdmin = S.me.role === 'admin';
-  $('page').innerHTML = `<div class="card"><h2>${esc(isAdmin ? S.me.admin.name : S.me.band.name)}</h2><p class="hint">${isAdmin ? '管理者アカウントです。自分のバンドの希望を出すときは、一度ログアウトしてバンドでログインしてください。' : 'バンド名の変更は管理者に頼んでください。'}</p></div>
+  $('page').innerHTML = `<div class="card"><h2>${esc(isAdmin ? S.me.admin.name : S.me.band.name)}</h2><p class="hint">${isAdmin ? '管理者アカウントです。' : 'バンド名の変更は管理者に頼んでください。'}掛け持ちしている人は、右上の「👥 切替」から別のバンドでもログインしておくと、ログアウトせずに切り替えられます。</p></div>
   <form class="card" id="pwForm"><h2>パスワード変更</h2>
   <label for="oldPw">今のパスワード</label><input id="oldPw" type="password" autocomplete="current-password" required>
   <label for="newPw">新しいパスワード（8文字以上）</label><input id="newPw" type="password" autocomplete="new-password" minlength="8" required>
@@ -317,8 +456,10 @@ async function pageAdmin(keepScroll) {
   if (S.tab !== 'admin' || S.month.admin !== m) return;
   AD = d;
   AD.form = null;
-  AD.edit = d.slots.length ? Object.fromEntries(d.slots.map(s => [s.day, { first: s.first, second: s.second }]))
-                          : Object.fromEntries(daysOf(m).map(day => [day, { first: true, second: true }]));
+  AD.calMode = AD.calMode || 'toggle';
+  AD.selDay = null;
+  AD.edit = d.slots.length ? Object.fromEntries(d.slots.map(s => [s.day, { first: s.first, second: s.second, t: s.t || null }]))
+                          : Object.fromEntries(daysOf(m).map(day => [day, { first: true, second: true, t: null }]));
   drawAdmin();
   if (keepScroll) window.scrollTo(0, y);
 }
@@ -331,6 +472,10 @@ function captureForm() {
   if (!$('saveMonth')) return;
   AD.form = { status: $('mStatus') ? $('mStatus').value : AD.info.rawStatus, deadline: $('mDeadline').value,
     t1s: $('t1s').value, t1e: $('t1e').value, t2s: $('t2s').value, t2e: $('t2e').value };
+}
+function baseTimes() {
+  const F = AD.form || {}, t = AD.info.times;
+  return { p1start: F.t1s || t.p1start, p1end: F.t1e || t.p1end, p2start: F.t2s || t.p2start, p2end: F.t2e || t.p2end };
 }
 
 function drawAdmin() {
@@ -349,22 +494,32 @@ function drawAdmin() {
     ? `<p><span class="pill ok">確定</span> 変更するには「割り当て」で確定を取り消します</p>`
     : `<select id="mStatus">${opts}</select><p class="hint">「受付中」にすると、バンドが希望を出せるようになります。締切日時を過ぎると自動で締め切ります。</p>`);
   prep += `<label for="mDeadline">締切日時</label><input id="mDeadline" type="datetime-local" value="${esc(F.deadline)}">`;
-  prep += `<div class="grid2"><div><label>前半 開始</label><input type="time" id="t1s" value="${esc(F.t1s)}"></div><div><label>前半 終了</label><input type="time" id="t1e" value="${esc(F.t1e)}"></div>
+  prep += `<h3>基本の時刻</h3><div class="grid2"><div><label>前半 開始</label><input type="time" id="t1s" value="${esc(F.t1s)}"></div><div><label>前半 終了</label><input type="time" id="t1e" value="${esc(F.t1e)}"></div>
     <div><label>後半 開始</label><input type="time" id="t2s" value="${esc(F.t2s)}"></div><div><label>後半 終了</label><input type="time" id="t2e" value="${esc(F.t2e)}"></div></div>`;
-  prep += `<h3>利用できる枠 ${d.slots.length ? '' : '<span class="pill warn">未保存</span>'}</h3><p class="hint" style="margin:0 0 8px">緑＝使える、灰色＝使えない（他の部活など）。タップで切り替え。</p>
-    <div class="row" style="margin-bottom:10px"><button class="small" data-bulk="all">全部○</button><button class="small" data-bulk="weekend">土日を×</button><button class="small" data-bulk="none">全部×</button></div>`;
-  prep += daysOf(m).map(day => {
+  prep += `<h3>音楽室が使える日 ${d.slots.length ? '' : '<span class="pill warn">未保存</span>'}</h3>
+    <div class="segment" style="margin-bottom:8px"><button data-mode="toggle" class="${AD.calMode === 'toggle' ? 'on' : ''}">タップで ○×切替</button><button data-mode="edit" class="${AD.calMode === 'edit' ? 'on' : ''}">タップで 詳細・時間</button></div>`;
+  prep += calendar(m, ADMIN_WEEK_START, day => {
     const e = AD.edit[day];
-    return `<div class="avail">${dayLabel(day)}<button data-av="${day}|first" class="${e.first ? '' : 'off'}">前半 ${e.first ? '○' : '×'}</button><button data-av="${day}|second" class="${e.second ? '' : 'off'}">後半 ${e.second ? '○' : '×'}</button></div>`;
-  }).join('');
-  prep += `<button class="primary wide" id="saveMonth">月の設定を保存</button>`;
+    const cls = e.first && e.second ? 'full' : e.first || e.second ? 'half' : 'closed';
+    const label = e.first && e.second ? '' : e.first ? '<span class="rk" style="color:var(--warn)">前のみ</span>' : e.second ? '<span class="rk" style="color:var(--warn)">後のみ</span>' : '<span class="rk" style="color:#a2a8b5">×</span>';
+    return { cls: cls + (AD.selDay === day ? ' sel' : ''), html: label + (e.t ? '<span class="badge">⏰</span>' : '') };
+  });
+  prep += `<div class="legend"><span><i style="background:var(--okbg);border:1px solid #bfe3cf"></i>両方使える</span><span><i style="background:#fff8e6;border:1px solid #f0dca8"></i>片方だけ</span><span><i style="background:#eceef3"></i>使えない</span><span>⏰ 時間が違う</span></div>`;
+  if (AD.calMode === 'edit' && AD.selDay) prep += dayEditor(AD.selDay);
+  else if (AD.calMode === 'edit') prep += `<p class="hint">時間や前半・後半を変えたい日をタップしてください。</p>`;
+  const wdOpts = [1, 2, 3, 4, 5, 6, 0].map(w => `<option value="${w}">毎週${WD[w]}曜</option>`).join('');
+  prep += `<div class="row" style="margin:8px 0"><button class="small" data-bulk="all">全部○</button><button class="small" data-bulk="weekend">土日を×</button><button class="small" data-bulk="none">全部×</button></div>
+    <div class="row"><select id="bulkWd" style="min-height:38px">${wdOpts}</select><button class="small" data-bulk="wdoff">を×にする</button><button class="small" data-bulk="wdon">を○にする</button></div>`;
+  prep += `<button class="primary wide" id="saveMonth">月の設定を保存</button><p class="hint">カレンダーの変更は「保存」を押すまで反映されません。</p>`;
   html += sec('prep', '① 月の準備', prep, statusPill(info));
 
   // ② 提出状況
   const sorted = active.slice().sort((a, b) => (a.requests.length ? 1 : 0) - (b.requests.length ? 1 : 0) || a.name.localeCompare(b.name, 'ja'));
-  let sub = `<p class="hint" style="margin:0 0 6px">「直近${d.historyMonths}か月」＝公平性の計算に使う過去の確定回数</p><ul class="list">` + sorted.map(b => `<li><div class="line"><span class="nm">${esc(b.name)}</span>${b.requests.length ? `<span class="pill ok">${b.requests.length}件</span>` : '<span class="pill ng">未提出</span>'}</div>
+  const notYet = active.filter(b => !b.requests.length);
+  let sub = (notYet.length ? `<button class="small" id="copyNotYet" style="margin-bottom:8px">📋 未提出バンドをコピー（LINE用）</button>` : '') +
+    `<p class="hint" style="margin:0 0 6px">「直近${d.historyMonths}か月」＝公平性の計算に使う過去の確定回数</p><ul class="list">` + sorted.map(b => `<li><div class="line"><span class="nm">${esc(b.name)}</span>${b.requests.length ? `<span class="pill ok">${b.requests.length}件</span>` : '<span class="pill ng">未提出</span>'}</div>
     <div class="hint" style="margin:2px 0 0">直近${d.historyMonths}か月：${b.history}回${b.updated ? '・提出 ' + esc(fmtDT(b.updated)) : ''}</div>
-    ${b.requests.length ? `<details><summary class="hint">希望を見る</summary><ol class="hint">${b.requests.map(s => `<li>${esc(slotText(s))}</li>`).join('')}</ol></details>` : ''}</li>`).join('') + '</ul>';
+    ${b.requests.length ? `<details><summary class="hint">希望を見る</summary><ol class="hint">${b.requests.map(s => `<li>${esc(slotText(s, d))}</li>`).join('')}</ol></details>` : ''}</li>`).join('') + '</ul>';
   if (!active.length) sub = '<p class="empty">まだバンドが登録されていません</p>';
   html += sec('sub', '② 提出状況', sub, `<span class="pill">${submitted.length}/${active.length}</span>`);
 
@@ -377,7 +532,7 @@ function drawAdmin() {
   al += `<div class="row">` +
     (confirmed ? `<button class="danger" id="unconfirm">確定を取り消す</button>`
                : `<button class="primary" id="runAlloc" ${d.slots.length ? '' : 'disabled'}>自動割り当て${drafts.length ? 'をやり直す' : 'を実行'}</button><button class="accent" id="confirmAlloc" ${drafts.length ? '' : 'disabled'}>一括確定して公開</button>`) + `</div>`;
-  if (d.allocs.length || confirmed || drafts.length) {
+  if (d.allocs.length) {
     const cnt = {}; d.allocs.forEach(a => cnt[a.bandId] = (cnt[a.bandId] || 0) + 1);
     const none = submitted.filter(b => !cnt[b.id]);
     al += `<h3>バンド別の枠数</h3><div class="chips">` + active.filter(b => cnt[b.id]).sort((a, b) => cnt[a.id] - cnt[b.id]).map(b => `<span class="pill">${esc(b.name)} ${cnt[b.id]}</span>`).join('') + `</div>`;
@@ -388,11 +543,12 @@ function drawAdmin() {
   if (slotDays.length) {
     al += `<h3>枠ごとの割り当て</h3><p class="hint" style="margin:0 0 8px">選び直すと、その枠だけ手動で変更されます。</p>`;
     al += slotDays.map(day => {
+      const t = timesFor(d, day);
       const one = p => {
         const id = day + '|' + p, a = amap[id];
         if (!open.has(id) && !a) return `<div><div class="meta">${PJ[p]}</div><select disabled><option>利用不可</option></select></div>`;
         const meta = a ? (a.method === '手動' ? '手動' : '第' + a.rank + '希望') : '空き';
-        return `<div><div class="meta">${PJ[p]}・${meta}${!open.has(id) ? ' <b style="color:var(--ng)">利用不可の枠です</b>' : ''}</div><select data-slot="${id}">${optsFor(a && a.bandId)}</select></div>`;
+        return `<div><div class="meta">${PJ[p]} ${timeStr(t, p)}・${meta}${!open.has(id) ? ' <b style="color:var(--ng)">利用不可の枠です</b>' : ''}</div><select data-slot="${id}">${optsFor(a && a.bandId)}</select></div>`;
       };
       return `<div class="alloc">${dayLabel(day)}<div class="two">${one('first')}${one('second')}</div></div>`;
     }).join('');
@@ -411,6 +567,16 @@ function drawAdmin() {
   bindAdmin();
 }
 
+/** 1日分の詳細編集（前半・後半の○×、その日だけの時刻） */
+function dayEditor(day) {
+  const e = AD.edit[day], t = e.t || baseTimes(), i = dayInfo(day);
+  return `<div class="dayedit" id="dayEditor"><h3>${Number(day.slice(5, 7))}/${i.d}(${i.wd}) の設定 ${e.t ? '<span class="pill warn">時間を変更中</span>' : ''}</h3>
+    <div class="two"><button data-dp="first" class="${e.first ? 'on' : 'off'}">前半 ${e.first ? '○' : '×'}</button><button data-dp="second" class="${e.second ? 'on' : 'off'}">後半 ${e.second ? '○' : '×'}</button></div>
+    <div class="grid2"><div><label>前半 開始</label><input type="time" id="d1s" value="${esc(t.p1start)}"></div><div><label>前半 終了</label><input type="time" id="d1e" value="${esc(t.p1end)}"></div>
+    <div><label>後半 開始</label><input type="time" id="d2s" value="${esc(t.p2start)}"></div><div><label>後半 終了</label><input type="time" id="d2e" value="${esc(t.p2end)}"></div></div>
+    <div class="row" style="margin-top:10px"><button class="primary small" id="dApply">この日の時間にする</button><button class="small" id="dApplyWd">毎週${i.wd}曜に反映</button><button class="small" id="dReset">基本の時刻に戻す</button></div></div>`;
+}
+
 function bindAdmin() {
   const m = AD.info.month;
   bindMonthBar('admin', () => pageAdmin());
@@ -420,17 +586,43 @@ function bindAdmin() {
     if (el.dataset.sec === 'settings' && el.open) loadSettings();
   }));
   if (S.adminOpen.settings) loadSettings();
-  // 利用枠
-  document.querySelectorAll('[data-av]').forEach(b => b.onclick = () => {
-    const [day, p] = b.dataset.av.split('|'); const e = AD.edit[day]; e[p] = !e[p];
-    b.classList.toggle('off', !e[p]); b.textContent = PJ[p] + ' ' + (e[p] ? '○' : '×');
+  // 利用枠カレンダー
+  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { AD.calMode = b.dataset.mode; AD.selDay = null; keepDraw(); });
+  document.querySelectorAll('[data-cal]').forEach(c => c.onclick = () => {
+    const day = c.dataset.cal, e = AD.edit[day];
+    if (AD.calMode === 'toggle') { const on = !(e.first || e.second); e.first = e.second = on; }
+    else AD.selDay = AD.selDay === day ? null : day;
+    keepDraw();
+    if (AD.calMode === 'edit' && AD.selDay) setTimeout(() => jumpTo('dayEditor'), 50);
   });
+  document.querySelectorAll('[data-dp]').forEach(b => b.onclick = () => { const e = AD.edit[AD.selDay]; e[b.dataset.dp] = !e[b.dataset.dp]; keepDraw(); });
+  const readDay = () => ({ p1start: $('d1s').value, p1end: $('d1e').value, p2start: $('d2s').value, p2end: $('d2e').value });
+  const okTimes = t => {
+    if (!t.p1start || !t.p1end || !t.p2start || !t.p2end) { toast('時刻をすべて入力してください', true); return false; }
+    if (t.p1start >= t.p1end || t.p2start >= t.p2end) { toast('終了は開始より後にしてください', true); return false; }
+    if (t.p1end > t.p2start) { toast('前半の終了が後半の開始より後になっています', true); return false; }
+    return true;
+  };
+  const same = t => { const b = baseTimes(); return ['p1start', 'p1end', 'p2start', 'p2end'].every(k => t[k] === b[k]); };
+  if ($('dApply')) {
+    $('dApply').onclick = () => { const t = readDay(); if (!okTimes(t)) return; AD.edit[AD.selDay].t = same(t) ? null : t; keepDraw(); toast('この日の時間を変えました（保存を押すと反映）'); };
+    $('dApplyWd').onclick = () => {
+      const t = readDay(); if (!okTimes(t)) return;
+      const w = dayInfo(AD.selDay).w, src = AD.edit[AD.selDay];
+      Object.entries(AD.edit).forEach(([day, e]) => { if (dayInfo(day).w === w) { e.t = same(t) ? null : Object.assign({}, t); e.first = src.first; e.second = src.second; } });
+      keepDraw(); toast('毎週' + WD[w] + '曜に反映しました（保存を押すと反映）');
+    };
+    $('dReset').onclick = () => { AD.edit[AD.selDay].t = null; keepDraw(); };
+  }
   document.querySelectorAll('[data-bulk]').forEach(b => b.onclick = () => {
+    const wd = Number($('bulkWd').value);
     Object.entries(AD.edit).forEach(([day, e]) => {
       const w = dayInfo(day).w;
       if (b.dataset.bulk === 'all') { e.first = e.second = true; }
       if (b.dataset.bulk === 'none') { e.first = e.second = false; }
       if (b.dataset.bulk === 'weekend' && (w === 0 || w === 6)) { e.first = e.second = false; }
+      if (b.dataset.bulk === 'wdoff' && w === wd) { e.first = e.second = false; }
+      if (b.dataset.bulk === 'wdon' && w === wd) { e.first = e.second = true; }
     });
     keepDraw();
   });
@@ -439,11 +631,18 @@ function bindAdmin() {
     const status = $('mStatus') ? $('mStatus').value : AD.info.rawStatus;
     if (status === '受付中' && !$('mDeadline').value && !confirm('締切日時が空です。締切なしで受付を始めますか？')) return;
     try {
-      const r = await api('saveMonth', { month: m, status, deadline: $('mDeadline').value, times, slots: Object.entries(AD.edit).map(([day, e]) => ({ day, first: e.first, second: e.second })) });
+      const r = await api('saveMonth', { month: m, status, deadline: $('mDeadline').value, times, slots: Object.entries(AD.edit).map(([day, e]) => ({ day, first: e.first, second: e.second, t: e.t || undefined })) });
       toast('保存しました（状態：' + r.info.status + '）');
       if (r.closedButAllocated) toast('注意：利用不可にした枠に割り当てが' + r.closedButAllocated + '件あります。③で直してください', true);
       pageAdmin(true);
     } catch (e) {}
+  };
+  // 提出状況
+  const cp = $('copyNotYet');
+  if (cp) cp.onclick = () => {
+    const names = AD.bands.filter(b => b.status === '有効' && !b.requests.length).map(b => b.name);
+    const text = `【${monthLabel(m)}の部室の希望】\nまだ出していないバンド：\n${names.map(n => '・' + n).join('\n')}\n締切：${fmtDT(AD.info.deadline) || '未定'}\n${location.href.split('#')[0]}`;
+    copyText(text).then(() => toast('コピーしました。LINEに貼り付けてね')).catch(() => toast('コピーできませんでした', true));
   };
   // 割り当て
   const run = $('runAlloc');
@@ -487,6 +686,15 @@ function bindAdmin() {
 }
 function keepDraw() { const y = window.scrollY; captureForm(); drawAdmin(); window.scrollTo(0, y); }
 
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+  return new Promise((res, rej) => {
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy') ? res() : rej(); } catch (e) { rej(e); } finally { ta.remove(); }
+  });
+}
+
 let ST = null, editAdmin = null;
 async function loadSettings() {
   const box = $('settingsBody'); if (!box) return;
@@ -521,7 +729,7 @@ function drawSettings() {
     if (pw.length < 8) return toast('パスワードは8文字以上にしてください', true);
     try {
       await api('updateAdmin', { adminId: b.dataset.asave, password: pw });
-      if (b.dataset.asave === ST.myId) { toast('自分のパスワードを変えたので、もう一度ログインしてください'); setToken(null); S.me = null; render(); return; }
+      if (b.dataset.asave === ST.myId) { toast('自分のパスワードを変えたので、もう一度ログインしてください'); ACC.removeCur(); verifyCurrent().then(render); return; }
       toast('パスワードをリセットしました。本人に伝えてください'); editAdmin = null; loadSettings();
     } catch (e) {}
   });

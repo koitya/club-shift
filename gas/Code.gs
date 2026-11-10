@@ -29,7 +29,7 @@ const SHEETS = {
   admins:   { name: '管理者',   head: ['ID', '名前', '照合キー', 'ソルト', 'ハッシュ', '版', '状態', '作成日時'] },
   bands:    { name: 'バンド',   head: ['ID', 'バンド名', '照合キー', 'ソルト', 'ハッシュ', '版', '状態', '登録日時'] },
   months:   { name: '月設定',   head: ['月', '状態', '締切', '前半開始', '前半終了', '後半開始', '後半終了', '更新日時'] },
-  slots:    { name: '利用枠',   head: ['月', '日付', '前半', '後半'] },
+  slots:    { name: '利用枠',   head: ['月', '日付', '前半', '後半', '前半開始', '前半終了', '後半開始', '後半終了'] },
   requests: { name: '希望',     head: ['月', 'バンドID', '日付', '枠', '順位', '更新日時'] },
   allocs:   { name: '割り当て', head: ['月', '日付', '枠', 'バンドID', '状態', '方法', '希望順位', '更新日時'] },
   settings: { name: '設定',     head: ['項目', '値', '説明'] },
@@ -189,6 +189,7 @@ function actMonth_(req, auth) {
       .map(r => r[2] + '|' + PERIOD_FROM_JA[r[3]]);
     const up = read_('requests').find(r => r[0] === m && r[1] === auth.id);
     res.myUpdated = up ? up[5] : '';
+    res.openMonths = openMonthsFor_(auth.id);
   }
   return res;
 }
@@ -255,10 +256,7 @@ function actSaveMonth_(req, auth) {
   const deadline = String(req.deadline || '');
   if (deadline && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(deadline)) throw userErr_('締切日時の形式が正しくありません');
   const t = req.times || {};
-  ['p1start', 'p1end', 'p2start', 'p2end'].forEach(k => {
-    if (!/^\d{2}:\d{2}$/.test(String(t[k] || ''))) throw userErr_('時刻をすべて入力してください');
-  });
-  if (t.p1start >= t.p1end || t.p2start >= t.p2end) throw userErr_('終了時刻は開始時刻より後にしてください');
+  checkTimes_(t, '基本の時刻');
   const n = daysIn_(m);
   const given = {};
   (Array.isArray(req.slots) ? req.slots : []).forEach(s => { given[String(s.day)] = s; });
@@ -266,7 +264,13 @@ function actSaveMonth_(req, auth) {
   for (let d = 1; d <= n; d++) {
     const day = m + '-' + pad_(d);
     const s = given[day] || { first: false, second: false };
-    slotRows.push([m, day, s.first ? '○' : '×', s.second ? '○' : '×']);
+    let tt = ['', '', '', ''];
+    if (s.t) {
+      checkTimes_(s.t, Number(day.slice(5, 7)) + '/' + Number(day.slice(8)) + 'の時刻');
+      const same = ['p1start', 'p1end', 'p2start', 'p2end'].every(k => s.t[k] === t[k]);
+      if (!same) tt = [s.t.p1start, s.t.p1end, s.t.p2start, s.t.p2end];
+    }
+    slotRows.push([m, day, s.first ? '○' : '×', s.second ? '○' : '×'].concat(tt));
   }
   write_('slots', slotRows);
   const monthRows = read_('months').filter(r => r[0] !== m);
@@ -510,6 +514,22 @@ function monthInfo_(m) {
   return { month: m, rawStatus: raw, status: status, deadline: deadline, times: times, accepting: raw === '受付中' && !past, exists: !!row };
 }
 
+function checkTimes_(t, label) {
+  ['p1start', 'p1end', 'p2start', 'p2end'].forEach(k => {
+    if (!/^\d{2}:\d{2}$/.test(String(t[k] || ''))) throw userErr_(label + '：時刻をすべて入力してください');
+  });
+  if (t.p1start >= t.p1end || t.p2start >= t.p2end) throw userErr_(label + '：終了は開始より後にしてください');
+  if (t.p1end > t.p2start) throw userErr_(label + '：前半の終了が後半の開始より後になっています');
+}
+
+/** 受付中の月と、そのバンドが提出済みかどうか（締切リマインド用） */
+function openMonthsFor_(bandId) {
+  const req = read_('requests');
+  return read_('months').map(r => monthInfo_(r[0])).filter(i => i.accepting)
+    .map(i => ({ month: i.month, deadline: i.deadline, submitted: req.some(r => r[0] === i.month && r[1] === bandId) }))
+    .sort((a, b) => a.month < b.month ? -1 : 1);
+}
+
 function setMonthStatus_(m, status) {
   const rows = read_('months');
   let row = rows.find(r => r[0] === m);
@@ -524,7 +544,11 @@ function setMonthStatus_(m, status) {
 
 function slotsOf_(m) {
   return read_('slots').filter(r => r[0] === m)
-    .map(r => ({ day: r[1], first: r[2] === '○', second: r[3] === '○' }))
+    .map(r => {
+      const o = { day: r[1], first: r[2] === '○', second: r[3] === '○' };
+      if (r[4] && r[5] && r[6] && r[7]) o.t = { p1start: r[4], p1end: r[5], p2start: r[6], p2end: r[7] };
+      return o;
+    })
     .sort((a, b) => a.day < b.day ? -1 : 1);
 }
 
