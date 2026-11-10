@@ -310,7 +310,7 @@ async function pageShift() {
       const closed = !(s && (s.first || s.second)) && !conf[day + '|first'] && !conf[day + '|second'];
       return { cls: closed ? 'closed' : '', html: closed ? '' : `<span class="bars">${bar('first')}${bar('second')}</span>${s && s.t ? '<span class="badge">⏰</span>' : ''}` };
     });
-    html += `<div class="legend"><span><i class="lg-mine"></i>自分</span><span><i class="lg-taken"></i>他のバンド</span><span><i class="lg-free"></i>空き</span><span>⏰ 時間が違う日</span></div>`;
+    html += `<div class="legend"><span><i class="lg-mine"></i>自分</span><span><i class="lg-taken"></i>埋まってる</span><span><i class="lg-free"></i>空き</span><span>⏰ 時間が違う日</span></div>`;
   }
   if (mineIds.size && d.confirmed.length) html += `<label class="toggle"><input type="checkbox" id="onlyMine" ${S.onlyMine ? 'checked' : ''}> 自分のバンドだけ表示</label>`;
   const rows = [];

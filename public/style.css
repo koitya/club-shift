@@ -151,9 +151,9 @@ button.wide{width:100%;margin-top:16px}
 .cal .bars{display:flex;flex-direction:column;gap:3px;width:100%;padding:0 3px}
 .cal .br{display:flex;align-items:center;gap:2px}
 .cal .br em{font-style:normal;font-size:10px;font-weight:600;color:var(--muted);width:11px;line-height:1}
-.cal .bar{flex:1;height:9px;border-radius:3px;background:#e9ebf0}
-.cal .bar.free{background:#e9ebf0}.cal .bar.taken{background:#1b2340}.cal .bar.mine{background:#ff6a2b}.cal .bar.pick{background:var(--blue)}.cal .bar.x{background:transparent;border:1px dashed #c3c8d3}
-.legend i.lg-mine{background:#ff6a2b}.legend i.lg-taken{background:#1b2340}.legend i.lg-free{background:#e9ebf0;border:1px solid #d5d9e2}.legend i.lg-pick{background:var(--blue)}
+.cal .bar{flex:1;height:9px;border-radius:3px;background:#dcdfe6}
+.cal .bar.free{background:#1f8a5b}.cal .bar.taken{background:#dcdfe6}.cal .bar.mine{background:#ff6a2b}.cal .bar.pick{background:var(--blue)}.cal .bar.x{background:transparent;border:1px dashed #c3c8d3}
+.legend i.lg-mine{background:#ff6a2b}.legend i.lg-taken{background:#dcdfe6}.legend i.lg-free{background:#1f8a5b}.legend i.lg-pick{background:var(--blue)}
 .cal .badge{position:absolute;top:2px;right:3px;font-size:10px;line-height:1}
 .cal .rk{font-size:10px;color:var(--blue);font-weight:800}
 .cal .c.full{background:var(--okbg);border-color:#bfe3cf}
