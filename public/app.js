@@ -306,11 +306,11 @@ async function pageShift() {
   if (d.slots.length || d.confirmed.length) {
     html += calendar(m, MEMBER_WEEK_START, day => {
       const s = slotMap[day];
-      const bar = p => { const x = conf[day + '|' + p]; const open = s && s[p]; return `<span class="bar ${isMine(x) ? 'mine' : x ? 'taken' : open ? 'free' : 'x'}"></span>`; };
+      const bar = p => { const x = conf[day + '|' + p]; const open = s && s[p]; return `<span class="br"><em>${PJ[p][0]}</em><span class="bar ${isMine(x) ? 'mine' : x ? 'taken' : open ? 'free' : 'x'}"></span></span>`; };
       const closed = !(s && (s.first || s.second)) && !conf[day + '|first'] && !conf[day + '|second'];
       return { cls: closed ? 'closed' : '', html: closed ? '' : `<span class="bars">${bar('first')}${bar('second')}</span>${s && s.t ? '<span class="badge">⏰</span>' : ''}` };
     });
-    html += `<div class="legend"><span><i style="background:var(--accent)"></i>自分</span><span><i style="background:#9aa3b8"></i>他のバンド</span><span><i style="background:#cfe9db"></i>空き</span><span>⏰ 時間が違う日</span><span>上＝前半・下＝後半</span></div>`;
+    html += `<div class="legend"><span><i class="lg-mine"></i>自分</span><span><i class="lg-taken"></i>他のバンド</span><span><i class="lg-free"></i>空き</span><span>⏰ 時間が違う日</span></div>`;
   }
   if (mineIds.size && d.confirmed.length) html += `<label class="toggle"><input type="checkbox" id="onlyMine" ${S.onlyMine ? 'checked' : ''}> 自分のバンドだけ表示</label>`;
   const rows = [];
@@ -384,10 +384,11 @@ function drawRequest(scrollTo) {
     html += calendar(R.month, MEMBER_WEEK_START, day => {
       const s = slotMap[day];
       if (!s || !(s.first || s.second)) return { cls: 'closed' };
-      const bar = p => `<span class="bar ${R.list.includes(day + '|' + p) ? 'pick' : s[p] ? 'free' : 'x'}"></span>`;
+      const bar = p => `<span class="br"><em>${PJ[p][0]}</em><span class="bar ${R.list.includes(day + '|' + p) ? 'pick' : s[p] ? 'free' : 'x'}"></span></span>`;
       const ranks = ['first', 'second'].map(p => R.list.indexOf(day + '|' + p)).filter(i => i >= 0).map(i => i + 1);
       return { html: `<span class="bars">${bar('first')}${bar('second')}</span>${ranks.length ? `<span class="rk">${ranks.join(',')}</span>` : ''}${s.t ? '<span class="badge">⏰</span>' : ''}` };
     });
+    html += `<div class="legend"><span><i class="lg-pick"></i>選んだ枠（数字＝希望順位）</span><span><i class="lg-free"></i>選べる枠</span><span>⏰ 時間が違う日</span></div>`;
     html += `<p class="hint" style="margin:0 0 10px">日付をタップするとその日に移動します。下の一覧で前半・後半をタップ（もう一度タップで外す）。</p>`;
     const rows = daysOf(R.month).filter(day => slotMap[day] && (slotMap[day].first || slotMap[day].second)).map(day => {
       const t = timesFor(d, day);
