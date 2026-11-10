@@ -227,7 +227,7 @@ function bindAuth() {
   $('registerForm').onsubmit = async e => {
     e.preventDefault();
     if ($('regPw').value !== $('regPw2').value) return toast('確認用パスワードが一致しません', true);
-    if ($('regPw').value.length < 8) return toast('パスワードは8文字以上にしてください', true);
+    if ($('regPw').value.length < 4) return toast('パスワードは4文字以上にしてください', true);
     try {
       const r = await api('register', { name: $('regName').value, password: $('regPw').value, passphrase: $('regPhrase').value }, { token: null });
       loggedIn(r); toast('登録しました。パスワードはバンドの人と共有しておいてね');
@@ -431,12 +431,12 @@ function drawRequest(scrollTo) {
 
 /* ---------- アカウント ---------- */
 function pageAccount() {
-  const isAdmin = S.me.role === 'admin';
+  const isAdmin = S.me.role === 'admin', min = isAdmin ? 8 : 4;
   $('page').innerHTML = `<div class="card"><h2>${esc(isAdmin ? S.me.admin.name : S.me.band.name)}</h2><p class="hint">${isAdmin ? '管理者アカウントです。' : 'バンド名の変更は管理者に頼んでください。'}掛け持ちしている人は、右上の「👥 切替」から別のバンドでもログインしておくと、ログアウトせずに切り替えられます。</p></div>
   <form class="card" id="pwForm"><h2>パスワード変更</h2>
   <label for="oldPw">今のパスワード</label><input id="oldPw" type="password" autocomplete="current-password" required>
-  <label for="newPw">新しいパスワード（8文字以上）</label><input id="newPw" type="password" autocomplete="new-password" minlength="8" required>
-  <label for="newPw2">新しいパスワード（確認）</label><input id="newPw2" type="password" autocomplete="new-password" minlength="8" required>
+  <label for="newPw">新しいパスワード（${min}文字以上${isAdmin ? '' : '・数字4桁でもOK'}）</label><input id="newPw" type="password" autocomplete="new-password" minlength="${min}" required>
+  <label for="newPw2">新しいパスワード（確認）</label><input id="newPw2" type="password" autocomplete="new-password" minlength="${min}" required>
   <button class="primary wide" type="submit">変更する</button>
   <p class="hint">変更すると、他のスマホではログインし直しになります。</p></form>`;
   $('pwForm').onsubmit = async e => {
@@ -557,7 +557,7 @@ function drawAdmin() {
 
   // ④ バンド管理
   let bm = '<ul class="list">' + d.bands.slice().sort((a, b) => a.name.localeCompare(b.name, 'ja')).map(b => `<li><div class="line"><span class="nm">${esc(b.name)}</span><span>${b.status === '有効' ? '' : '<span class="pill ng">停止中</span> '}<button class="small" data-edit="${esc(b.id)}">編集</button></span></div>` +
-    (S.editBand === b.id ? `<div class="editbox"><label>バンド名</label><input id="ebName" value="${esc(b.name)}" maxlength="40"><label>新しいパスワード（リセットするときだけ入力）</label><input id="ebPw" type="text" autocomplete="off" placeholder="8文字以上"><div class="row" style="margin-top:10px"><button class="primary" data-save="${esc(b.id)}">保存</button><button class="${b.status === '有効' ? 'danger' : ''}" data-stop="${esc(b.id)}">${b.status === '有効' ? '停止する' : '再開する'}</button></div><p class="hint">停止するとログインできなくなり、割り当て対象から外れます（過去の記録は残ります）。</p></div>` : '') + '</li>').join('') + '</ul>';
+    (S.editBand === b.id ? `<div class="editbox"><label>バンド名</label><input id="ebName" value="${esc(b.name)}" maxlength="40"><label>新しいパスワード（リセットするときだけ入力）</label><input id="ebPw" type="text" autocomplete="off" placeholder="4文字以上（数字4桁でもOK）"><div class="row" style="margin-top:10px"><button class="primary" data-save="${esc(b.id)}">保存</button><button class="${b.status === '有効' ? 'danger' : ''}" data-stop="${esc(b.id)}">${b.status === '有効' ? '停止する' : '再開する'}</button></div><p class="hint">停止するとログインできなくなり、割り当て対象から外れます（過去の記録は残ります）。</p></div>` : '') + '</li>').join('') + '</ul>';
   if (!d.bands.length) bm = '<p class="empty">まだバンドが登録されていません</p>';
   html += sec('bands', '④ バンド管理', bm, `<span class="pill">${d.bands.length}</span>`);
 
@@ -670,7 +670,7 @@ function bindAdmin() {
   document.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => { S.editBand = S.editBand === b.dataset.edit ? null : b.dataset.edit; keepDraw(); });
   document.querySelectorAll('[data-save]').forEach(b => b.onclick = async () => {
     const pw = $('ebPw').value.trim();
-    if (pw && pw.length < 8) return toast('パスワードは8文字以上にしてください', true);
+    if (pw && pw.length < 4) return toast('パスワードは4文字以上にしてください', true);
     try {
       const r = await api('updateBand', { bandId: b.dataset.save, name: $('ebName').value, password: pw || undefined });
       toast(r.done.length ? r.done.join('、') + 'しました' + (pw ? '。新しいパスワードをバンドに伝えてください' : '') : '変更はありません');

@@ -17,8 +17,11 @@ const TZ = 'Asia/Tokyo';
 const APP_ID = 'club-shift-v1';
 const TOKEN_DAYS = 30;
 const MAX_REQUESTS = 31;
-const LOGIN_MAX_FAIL = 5;
-const LOGIN_LOCK_SEC = 600;
+const BAND_PW_MIN = 4;   // バンドのパスワード：4文字以上（数字4桁もOK）
+const ADMIN_PW_MIN = 8;  // 管理者のパスワード：8文字以上
+// ログイン失敗の回数ごとのロック時間（秒）。iPhoneのように段々長くなる
+const LOCK_STEPS = { 5: 60, 6: 300, 7: 900, 8: 3600 };
+const LOCK_MAX = 10800;
 const HASH_ROUNDS = 500;
 
 const PERIODS = { first: '前半', second: '後半' };
@@ -107,7 +110,7 @@ const ACTIONS = {
 function actRegister_(req) {
   const name = cleanName_(req.name);
   const pw = String(req.password || '');
-  checkPassword_(pw);
+  checkPassword_(pw, 'band');
   const phrase = getSetting_('passphrase');
   if (!phrase || normKey_(req.passphrase) !== normKey_(phrase)) throw userErr_('部の合言葉が違います');
   const key = normKey_(name);
@@ -156,7 +159,7 @@ function actChangePassword_(req, auth) {
   const row = rows.find(r => r[0] === auth.id);
   if (hash_(String(req.oldPassword || ''), row[3]) !== row[4]) throw userErr_('今のパスワードが違います');
   const pw = String(req.newPassword || '');
-  checkPassword_(pw);
+  checkPassword_(pw, auth.role);
   row[3] = Utilities.getUuid();
   row[4] = hash_(pw, row[3]);
   row[5] = String(Number(row[5] || 1) + 1);
@@ -369,7 +372,7 @@ function actUpdateBand_(req, auth) {
     row[1] = name; row[2] = key;
   }
   if (req.password) {
-    checkPassword_(String(req.password));
+    checkPassword_(String(req.password), 'band');
     row[3] = Utilities.getUuid();
     row[4] = hash_(String(req.password), row[3]);
     row[5] = String(Number(row[5] || 1) + 1);
@@ -397,7 +400,7 @@ function actAddAdmin_(req, auth) {
   const name = cleanName_(req.name);
   const key = normKey_(name);
   const pw = String(req.password || '');
-  checkPassword_(pw);
+  checkPassword_(pw, 'admin');
   const rows = read_('admins');
   if (rows.some(r => r[2] === key)) throw userErr_('その名前の管理者はすでにいます');
   const salt = Utilities.getUuid();
@@ -413,7 +416,7 @@ function actUpdateAdmin_(req, auth) {
   if (!row) throw userErr_('管理者が見つかりません');
   const done = [];
   if (req.password) {
-    checkPassword_(String(req.password));
+    checkPassword_(String(req.password), 'admin');
     row[3] = Utilities.getUuid();
     row[4] = hash_(String(req.password), row[3]);
     row[5] = String(Number(row[5] || 1) + 1);
@@ -608,8 +611,9 @@ function normKey_(s) {
   return String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function checkPassword_(pw) {
-  if (pw.length < 8) throw userErr_('パスワードは8文字以上にしてください');
+function checkPassword_(pw, kind) {
+  const min = kind === 'admin' ? ADMIN_PW_MIN : BAND_PW_MIN;
+  if (pw.length < min) throw userErr_((kind === 'admin' ? '管理者の' : '') + 'パスワードは' + min + '文字以上にしてください');
   if (pw.length > 72) throw userErr_('パスワードは72文字以内にしてください');
 }
 
@@ -667,13 +671,25 @@ function safeEq_(a, b) {
   return d === 0;
 }
 
+/* ログイン失敗の記録：{n: 失敗回数, until: ロック解除の時刻(ms)} */
+function failState_(key) {
+  try { return JSON.parse(CacheService.getScriptCache().get('fail:' + key) || '{"n":0,"until":0}'); } catch (e) { return { n: 0, until: 0 }; }
+}
+function lockMsg_(ms) {
+  const min = Math.ceil(ms / 60000);
+  return 'パスワードを何回も間違えたため、あと' + (min >= 60 ? Math.ceil(min / 60) + '時間' : min + '分') + 'ログインできません';
+}
 function checkThrottle_(key) {
-  const n = Number(CacheService.getScriptCache().get('fail:' + key) || 0);
-  if (n >= LOGIN_MAX_FAIL) throw userErr_('パスワードを' + LOGIN_MAX_FAIL + '回間違えたため、10分間ログインできません');
+  const st = failState_(key);
+  if (st.until > Date.now()) throw userErr_(lockMsg_(st.until - Date.now()));
 }
 function addFail_(key) {
-  const c = CacheService.getScriptCache();
-  c.put('fail:' + key, String(Number(c.get('fail:' + key) || 0) + 1), LOGIN_LOCK_SEC);
+  const st = failState_(key);
+  st.n++;
+  const sec = st.n >= 5 ? (LOCK_STEPS[st.n] || LOCK_MAX) : 0;
+  st.until = sec ? Date.now() + sec * 1000 : 0;
+  CacheService.getScriptCache().put('fail:' + key, JSON.stringify(st), 21600);
+  if (sec) throw userErr_('パスワードが違います。' + lockMsg_(sec * 1000));
 }
 function clearFail_(key) {
   CacheService.getScriptCache().remove('fail:' + key);
