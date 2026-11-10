@@ -181,3 +181,5 @@ button.wide{width:100%;margin-top:16px}
 .alert b{display:block}
 .alert button{background:var(--ng);color:#fff;flex:none}
 .due{color:var(--ng);font-weight:800}
+
+.stale{pointer-events:none;opacity:.6}

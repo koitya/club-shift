@@ -712,12 +712,68 @@ function sh_(k) {
 
 function read_(k) {
   if (MEMO[k]) return MEMO[k];
+  if (k !== 'log') {
+    const hit = cacheGet_(k);
+    if (hit) { MEMO[k] = hit; return hit; }
+  }
   const s = sh_(k);
   const n = s.getLastRow() - 1;
   const w = SHEETS[k].head.length;
   const rows = n > 0 ? s.getRange(2, 1, n, w).getDisplayValues().filter(r => r.some(v => v !== '')) : [];
   MEMO[k] = rows;
+  if (k !== 'log') cachePut_(k, rows);
   return rows;
+}
+
+/* ===== 高速化：シートの中身を一時保存（キャッシュ）して使い回す =====
+ * アプリからの書き込みでは自動で更新。スプレッドシートを手で直したときは onEdit で自動的に捨てる。
+ * 変更履歴から戻したときなどは、メニュー「部室シフト > アプリのキャッシュを消す」を押す。 */
+const CACHE_TTL = 3600;
+const CACHE_CHUNK = 25000;
+function cacheGet_(k) {
+  try {
+    const c = CacheService.getScriptCache();
+    const head = c.get('sh:' + k);
+    if (!head) return null;
+    const [ver, n] = head.split('|');
+    const keys = [];
+    for (let i = 0; i < Number(n); i++) keys.push('sh:' + k + ':' + ver + ':' + i);
+    const got = keys.length ? c.getAll(keys) : {};
+    let str = '';
+    for (let i = 0; i < keys.length; i++) { if (got[keys[i]] == null) return null; str += got[keys[i]]; }
+    return keys.length ? JSON.parse(str) : [];
+  } catch (e) { return null; }
+}
+function cachePut_(k, rows) {
+  try {
+    const c = CacheService.getScriptCache();
+    const str = JSON.stringify(rows);
+    const ver = String(Date.now()) + Math.floor(Math.random() * 1000);
+    const parts = {};
+    let n = 0;
+    for (let i = 0; i < str.length; i += CACHE_CHUNK) parts['sh:' + k + ':' + ver + ':' + (n++)] = str.slice(i, i + CACHE_CHUNK);
+    c.putAll(parts, CACHE_TTL);
+    c.put('sh:' + k, ver + '|' + n, CACHE_TTL);
+  } catch (e) { cacheClear_(k); }
+}
+function cacheClear_(k) {
+  try { CacheService.getScriptCache().remove('sh:' + k); } catch (e) {}
+}
+function clearAppCache() {
+  Object.keys(SHEETS).forEach(cacheClear_);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast('アプリのキャッシュを消しました'); } catch (e) {}
+}
+/** スプレッドシートを手で編集したら、そのシートのキャッシュを捨てる（自動で動きます） */
+function onEdit(e) {
+  try {
+    const name = e.range.getSheet().getName();
+    Object.keys(SHEETS).forEach(k => { if (SHEETS[k].name === name) cacheClear_(k); });
+  } catch (err) { clearAppCache(); }
+}
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi().createMenu('部室シフト').addItem('アプリのキャッシュを消す（変更履歴から戻したとき）', 'clearAppCache').addToUi();
+  } catch (e) {}
 }
 
 /** シート本体を丸ごと書き換える（1回の書き込みで行うので途中で壊れにくい） */
@@ -734,6 +790,7 @@ function write_(k, rows) {
     range.setValues(data);
   }
   MEMO[k] = rows.map(r => r.map(v => v == null ? '' : String(v)));
+  cachePut_(k, MEMO[k]);
 }
 
 function getSetting_(key) {
@@ -771,6 +828,7 @@ function setup() {
   if (!ss) throw new Error('スプレッドシートの「拡張機能 > Apps Script」から開いたプロジェクトで実行してください');
   const props = PropertiesService.getScriptProperties();
   props.setProperty('SPREADSHEET_ID', ss.getId());
+  Object.keys(SHEETS).forEach(cacheClear_);
   if (!props.getProperty('TOKEN_SECRET')) {
     props.setProperty('TOKEN_SECRET', Utilities.getUuid() + Utilities.getUuid());
   }

@@ -97,8 +97,9 @@ function jumpTo(id) {
 let busyN = 0;
 function busy(on) { busyN += on ? 1 : -1; $('busy').classList.toggle('hidden', busyN <= 0); }
 
+const READS = new Set(['ping', 'me', 'month', 'adminMonth', 'getSettings']);
 async function api(action, body = {}, opt = {}) {
-  busy(true);
+  if (!opt.quiet) busy(true);
   try {
     const res = await fetch(CFG.API_URL, {
       method: 'POST',
@@ -114,12 +115,48 @@ async function api(action, body = {}, opt = {}) {
       }
       throw new Error(j.error || 'エラーが起きました');
     }
+    if (!READS.has(action) && !['login', 'adminLogin', 'register'].includes(action)) C.drop(body.month);
     return j.data;
   } catch (e) {
     if (e instanceof TypeError) e = new Error('通信できませんでした。電波を確認して、もう一度試してください');
     if (!opt.silent) toast(e.message, true);
     throw e;
-  } finally { busy(false); }
+  } finally { if (!opt.quiet) busy(false); }
+}
+
+/* ---------- 画面側の保存データ（前に見た内容をすぐ表示して、裏で最新に更新） ---------- */
+const C = {
+  mem: {},
+  key(action, month) { const c = ACC.cur(); return c && c.me ? 'cs_c|' + ACC.keyOf(c.me) + '|' + action + '|' + month : null; },
+  get(k) { if (!k) return null; if (this.mem[k]) return this.mem[k]; try { const v = JSON.parse(localStorage.getItem(k) || 'null'); if (v) this.mem[k] = v; return v; } catch (e) { return null; } },
+  set(k, v) { if (!k) return; this.mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { this.trim(); } },
+  keys() { const a = []; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.indexOf('cs_c|') === 0) a.push(k); } } catch (e) {} return a.concat(Object.keys(this.mem)); },
+  /** 書き込みのあと：その月（月がなければ全部）の保存データを捨てる */
+  drop(month) { this.keys().forEach(k => { if (!month || k.endsWith('|' + month)) { delete this.mem[k]; try { localStorage.removeItem(k); } catch (e) {} } }); this.fresh = {}; },
+  dropAccount(me) { const p = 'cs_c|' + ACC.keyOf(me) + '|'; this.keys().forEach(k => { if (k.indexOf(p) === 0) { delete this.mem[k]; try { localStorage.removeItem(k); } catch (e) {} } }); },
+  trim() { this.keys().slice(0, 20).forEach(k => { try { localStorage.removeItem(k); } catch (e) {} }); },
+  fresh: {},
+};
+/** 保存データがあれば先に onCached で表示 → 最新を取ってきて onFresh(data, changed) */
+async function load(action, month, onCached, onFresh) {
+  const k = C.key(action, month), cached = C.get(k);
+  if (cached && onCached) onCached(cached);
+  try {
+    const fresh = await api(action, { month }, { silent: !!cached, quiet: !!cached });
+    C.set(k, fresh); C.fresh[k] = true;
+    onFresh(fresh, !cached || JSON.stringify(cached) !== JSON.stringify(fresh));
+    return true;
+  } catch (e) {
+    if (cached) toast('最新の情報を取れませんでした（前に見た内容を表示中）', true);
+    return !!cached;
+  }
+}
+/** 先読み：裏で取っておく */
+function prefetch(action, month) {
+  const k = C.key(action, month);
+  if (!k || C.fresh[k]) return;
+  C.fresh[k] = true;
+  api(action, { month }, { silent: true, quiet: true }).then(d => C.set(k, d)).catch(() => { delete C.fresh[k]; });
 }
 
 let toastT = 0;
@@ -140,15 +177,23 @@ async function boot() {
   }
   bindAuth();
   bindAccountSheet();
-  window.addEventListener('beforeunload', e => { if (S.req && S.req.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  await verifyCurrent();
-  render();
+  window.addEventListener('beforeunload', e => { if (S.req && (S.req.dirty || S.req.saving)) { e.preventDefault(); e.returnValue = ''; } });
+  if (ACC.cur() && ACC.cur().me) {
+    // 前回のログイン情報ですぐ表示して、裏で有効か確認
+    const before = JSON.stringify(ACC.cur().me), n = ACC.list.length;
+    render();
+    await verifyCurrent();
+    if (!ACC.cur() || ACC.list.length !== n || JSON.stringify(ACC.cur().me) !== before) render();
+  } else {
+    await verifyCurrent();
+    render();
+  }
 }
 
 /** 今のアカウントがまだ有効か確認（無効なら外して次へ） */
 async function verifyCurrent() {
   while (ACC.cur()) {
-    try { const me = await api('me', {}, { silent: true, token: S.token }); ACC.cur().me = me; ACC.save(); return true; }
+    try { const me = await api('me', {}, { silent: true, quiet: true, token: S.token }); ACC.cur().me = me; ACC.save(); return true; }
     catch (e) { if (/通信できません/.test(e.message)) return !!ACC.cur().me; ACC.removeCur(); }
   }
   return false;
@@ -193,7 +238,7 @@ function bindAccountSheet() {
   $('acctLogout').onclick = () => {
     if (!confirmLeave()) return;
     const name = ACC.label(S.me);
-    ACC.removeCur(); closeSheet(); S.tab = 'shift';
+    C.dropAccount(S.me); ACC.removeCur(); closeSheet(); S.tab = 'shift';
     toast(name + ' からログアウトしました');
     verifyCurrent().then(render);
   };
@@ -271,11 +316,16 @@ function bindChips() { document.querySelectorAll('[data-chip]').forEach(b => b.o
 /* ---------- シフト ---------- */
 async function pageShift() {
   const m = S.month.shift;
-  $('page').innerHTML = monthBar('shift') + '<p class="empty">読み込み中…</p>';
-  bindMonthBar('shift', pageShift);
-  let d;
-  try { d = await api('month', { month: m }); } catch (e) { $('page').innerHTML = monthBar('shift') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('shift', pageShift); return; }
-  if (S.tab !== 'shift' || S.month.shift !== m) return;
+  const ok = () => S.tab === 'shift' && S.month.shift === m;
+  let shown = false;
+  const draw = d => { if (!ok()) return; const y = window.scrollY; drawShift(d, m); if (shown) window.scrollTo(0, y); shown = true; };
+  if (!C.get(C.key('month', m))) { $('page').innerHTML = monthBar('shift') + '<p class="empty">読み込み中…</p>'; bindMonthBar('shift', pageShift); }
+  const got = await load('month', m, draw, (d, changed) => { if (changed || !shown) draw(d); });
+  if (!got && ok()) { $('page').innerHTML = monthBar('shift') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('shift', pageShift); }
+  if (ok()) { prefetch('month', nextMonth(m)); prefetch('month', prevMonth(m)); }
+}
+
+function drawShift(d, m) {
   const mineIds = new Set(ACC.bandIds());
   const isMine = x => x && mineIds.has(x.bandId);
   const multi = mineIds.size > 1;
@@ -342,16 +392,24 @@ async function pageShift() {
 
 /* ---------- 希望提出 ---------- */
 async function pageRequest() {
-  const m = S.month.request;
-  if (!S.req || S.req.month !== m || S.req.acc !== ACC.active) {
-    $('page').innerHTML = bandChips() + monthBar('request') + '<p class="empty">読み込み中…</p>';
-    bindMonthBar('request', pageRequest); bindChips();
-    let d;
-    try { d = await api('month', { month: m }); } catch (e) { $('page').innerHTML = monthBar('request') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('request', pageRequest); return; }
-    if (S.tab !== 'request' || S.month.request !== m) return;
-    S.req = { month: m, acc: ACC.active, data: d, list: d.myRequests.slice(), saved: d.myRequests.slice(), dirty: false, updated: d.myUpdated };
-  }
-  drawRequest();
+  const m = S.month.request, acc = ACC.active;
+  if (S.req && S.req.month === m && S.req.acc === acc && S.req.fresh) return drawRequest();
+  const ok = () => S.tab === 'request' && S.month.request === m && ACC.active === acc;
+  const setData = (d, fresh) => {
+    if (!ok()) return;
+    const R = S.req;
+    if (!R || R.month !== m || R.acc !== acc) {
+      S.req = { month: m, acc, data: d, list: d.myRequests.slice(), saved: d.myRequests.slice(), dirty: false, updated: d.myUpdated, fresh };
+    } else {
+      R.data = d; R.fresh = fresh;
+      if (!R.dirty && !R.saving) { R.list = d.myRequests.slice(); R.saved = d.myRequests.slice(); R.updated = d.myUpdated; }
+    }
+    drawRequest();
+  };
+  if (!C.get(C.key('month', m))) { $('page').innerHTML = bandChips() + monthBar('request') + '<p class="empty">読み込み中…</p>'; bindMonthBar('request', pageRequest); bindChips(); }
+  const got = await load('month', m, d => setData(d, false), (d, changed) => { if (changed || !S.req || !S.req.fresh) setData(d, true); });
+  if (!got && ok()) { $('page').innerHTML = monthBar('request') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('request', pageRequest); }
+  if (ok()) prefetch('month', nextMonth(m));
 }
 
 function drawRequest(scrollTo) {
@@ -376,7 +434,8 @@ function drawRequest(scrollTo) {
   } else {
     html += `<p class="hint">${info.accepting ? 'カレンダーか下の一覧で枠をタップすると、希望順に追加されます。候補が多いほど割り当てられやすくなります。' : '希望は出ていません。'}</p>`;
   }
-  if (R.updated && !R.dirty) html += `<p class="hint">最終保存：${esc(fmtDT(R.updated))}</p>`;
+  if (R.saving) html += `<p class="hint">保存中…（このまま他の画面に移っても大丈夫）</p>`;
+  else if (R.updated && !R.dirty) html += `<p class="hint">最終保存：${esc(fmtDT(R.updated))}</p>`;
   html += '</div>';
   if (info.accepting) {
     const slotMap = {}; d.slots.forEach(s => slotMap[s.day] = s);
@@ -401,7 +460,7 @@ function drawRequest(scrollTo) {
     });
     html += rows.length ? rows.join('') : '<p class="empty">利用できる枠がありません</p>';
     html += '</div>';
-    html += `<div class="savebar"><button id="saveReq" class="${R.dirty ? 'accent' : 'primary'}" ${R.dirty ? '' : 'disabled'}>${R.dirty ? '⚠ 未保存：タップして保存（' + R.list.length + '件）' : '保存済み'}</button></div>`;
+    html += `<div class="savebar"><button id="saveReq" class="${R.dirty ? 'accent' : 'primary'}" ${R.dirty ? '' : 'disabled'}>${R.dirty ? '⚠ 未保存：タップして保存（' + R.list.length + '件）' : R.saving ? '保存中…' : '保存済み'}</button></div>`;
   }
   const y = window.scrollY;
   $('page').innerHTML = html;
@@ -419,14 +478,17 @@ function drawRequest(scrollTo) {
   document.querySelectorAll('[data-down]').forEach(b => b.onclick = () => change(() => { const i = +b.dataset.down; [R.list[i + 1], R.list[i]] = [R.list[i], R.list[i + 1]]; }));
   document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => change(() => R.list.splice(+b.dataset.del, 1)));
   const sv = $('saveReq');
-  if (sv) sv.onclick = async () => {
-    sv.disabled = true;
-    try {
-      const r = await api('saveRequests', { month: R.month, slots: R.list });
-      R.saved = R.list.slice(); R.dirty = false; R.updated = r.updated;
-      toast(r.saved ? S.me.band.name + ' の希望を保存しました（' + r.saved + '件）' : '希望を取り下げました');
-    } catch (e) {}
+  if (sv) sv.onclick = () => {
+    // 押した瞬間に「保存済み」にして、通信は裏で。失敗したら元に戻す
+    const list = R.list.slice(), prevSaved = R.saved, name = S.me.band.name;
+    R.saved = list.slice(); R.dirty = false; R.saving = true;
     drawRequest();
+    api('saveRequests', { month: R.month, slots: list }, { quiet: true }).then(r => {
+      R.saving = false; R.updated = r.updated;
+      toast(r.saved ? name + ' の希望を保存しました（' + r.saved + '件）' : '希望を取り下げました');
+    }).catch(() => {
+      R.saving = false; R.saved = prevSaved; R.dirty = JSON.stringify(R.list) !== JSON.stringify(R.saved);
+    }).finally(() => { if (S.req === R && S.tab === 'request') drawRequest(); });
   };
 }
 
@@ -451,18 +513,28 @@ function pageAccount() {
 let AD = null;
 async function pageAdmin(keepScroll) {
   const m = S.month.admin, y = window.scrollY;
-  if (!keepScroll) { $('page').innerHTML = monthBar('admin') + '<p class="empty">読み込み中…</p>'; bindMonthBar('admin', () => pageAdmin()); }
-  let d;
-  try { d = await api('adminMonth', { month: m }); } catch (e) { return; }
-  if (S.tab !== 'admin' || S.month.admin !== m) return;
-  AD = d;
+  const ok = () => S.tab === 'admin' && S.month.admin === m;
+  const set = (d, fresh) => { if (!ok()) return; const yy = window.scrollY; setAdmin(d, fresh); if (keepScroll || AD.wasShown) window.scrollTo(0, keepScroll ? y : yy); AD.wasShown = true; };
+  if (keepScroll) {
+    // 操作の直後は最新だけを使う
+    try { const d = await api('adminMonth', { month: m }); C.set(C.key('adminMonth', m), d); set(d, true); } catch (e) {}
+    return;
+  }
+  if (!C.get(C.key('adminMonth', m))) { $('page').innerHTML = monthBar('admin') + '<p class="empty">読み込み中…</p>'; bindMonthBar('admin', () => pageAdmin()); }
+  const got = await load('adminMonth', m, d => set(d, false), d => set(d, true));
+  if (!got && ok()) { $('page').innerHTML = monthBar('admin') + '<p class="empty">読み込めませんでした</p>'; bindMonthBar('admin', () => pageAdmin()); }
+}
+
+function setAdmin(d, fresh) {
+  const m = d.info.month, wasShown = AD && AD.info && AD.info.month === m && AD.wasShown, mode = (AD && AD.calMode) || 'toggle';
+  AD = JSON.parse(JSON.stringify(d)); // 保存データを書き換えないようにコピー
+  AD.fresh = fresh; AD.wasShown = wasShown;
   AD.form = null;
-  AD.calMode = AD.calMode || 'toggle';
+  AD.calMode = mode;
   AD.selDay = null;
   AD.edit = d.slots.length ? Object.fromEntries(d.slots.map(s => [s.day, { first: s.first, second: s.second, t: s.t || null }]))
                           : Object.fromEntries(daysOf(m).map(day => [day, { first: true, second: true, t: null }]));
   drawAdmin();
-  if (keepScroll) window.scrollTo(0, y);
 }
 
 function sec(key, title, body, badge = '') {
@@ -564,6 +636,7 @@ function drawAdmin() {
 
   // ⑤ 設定
   html += sec('settings', '⑤ 設定', `<div id="settingsBody"><p class="empty">開くと読み込みます</p></div>`);
+  if (!AD.fresh) html = `<div class="banner info">最新の状態を確認中…（少しだけ待ってね）</div><div class="stale">${html}</div>`;
   $('page').innerHTML = html;
   bindAdmin();
 }
