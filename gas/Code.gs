@@ -26,6 +26,7 @@ const PERIOD_FROM_JA = { '前半': 'first', '後半': 'second' };
 const MONTH_STATUSES = ['準備中', '受付中', '締切', '確定'];
 
 const SHEETS = {
+  admins:   { name: '管理者',   head: ['ID', '名前', '照合キー', 'ソルト', 'ハッシュ', '版', '状態', '作成日時'] },
   bands:    { name: 'バンド',   head: ['ID', 'バンド名', '照合キー', 'ソルト', 'ハッシュ', '版', '状態', '登録日時'] },
   months:   { name: '月設定',   head: ['月', '状態', '締切', '前半開始', '前半終了', '後半開始', '後半終了', '更新日時'] },
   slots:    { name: '利用枠',   head: ['月', '日付', '前半', '後半'] },
@@ -38,10 +39,7 @@ const SHEETS = {
 const SETTING_NOTES = {
   passphrase: '部の合言葉（バンド登録のときに必要）。アプリの管理画面から変更できます',
   history_months: '公平性の計算で数える「過去の確定回数」の月数',
-  initial_admin_password: '初期の管理者パスワード。アプリで変更すると自動で消えます',
-  admin_salt: '触らないでください',
-  admin_hash: '触らないでください',
-  admin_ver: '触らないでください',
+  initial_admin: '最初の管理者のログイン情報。その管理者がパスワードを変更すると自動で消えます',
 };
 
 /* ================= 入口 ================= */
@@ -90,7 +88,7 @@ const ACTIONS = {
   me:            { auth: 'any',   fn: (req, a) => meOf_(a) },
   month:         { auth: 'any',   fn: actMonth_ },
   saveRequests:  { auth: 'band',  write: true, fn: actSaveRequests_ },
-  changePassword:{ auth: 'band',  write: true, fn: actChangePassword_ },
+  changePassword:{ auth: 'any',   write: true, fn: actChangePassword_ },
   adminMonth:    { auth: 'admin', fn: actAdminMonth_ },
   saveMonth:     { auth: 'admin', write: true, fn: actSaveMonth_ },
   runAllocation: { auth: 'admin', write: true, fn: actRunAllocation_ },
@@ -99,6 +97,8 @@ const ACTIONS = {
   unconfirm:     { auth: 'admin', write: true, fn: actUnconfirm_ },
   updateBand:    { auth: 'admin', write: true, fn: actUpdateBand_ },
   getSettings:   { auth: 'admin', fn: actGetSettings_ },
+  addAdmin:      { auth: 'admin', write: true, fn: actAddAdmin_ },
+  updateAdmin:   { auth: 'admin', write: true, fn: actUpdateAdmin_ },
   saveSettings:  { auth: 'admin', write: true, fn: actSaveSettings_ },
 };
 
@@ -136,18 +136,23 @@ function actLogin_(req) {
 }
 
 function actAdminLogin_(req) {
-  checkThrottle_('#admin');
-  const salt = getSetting_('admin_salt');
-  if (!salt || hash_(String(req.password || ''), salt) !== getSetting_('admin_hash')) {
-    addFail_('#admin');
-    throw userErr_('管理者パスワードが違います');
+  const key = normKey_(req.name);
+  if (!key) throw userErr_('名前を入力してください');
+  checkThrottle_('#admin:' + key);
+  const row = read_('admins').find(r => r[2] === key);
+  if (!row || hash_(String(req.password || ''), row[3]) !== row[4]) {
+    addFail_('#admin:' + key);
+    throw userErr_('名前かパスワードが違います');
   }
-  clearFail_('#admin');
-  return { token: sign_({ r: 'admin', id: 'admin', v: getSetting_('admin_ver') || '1' }), me: { role: 'admin' } };
+  if (row[6] !== '有効') throw userErr_('この管理者アカウントは停止中です');
+  clearFail_('#admin:' + key);
+  return { token: sign_({ r: 'admin', id: row[0], v: row[5] }), me: { role: 'admin', admin: { id: row[0], name: row[1] } } };
 }
 
+/** バンド・管理者共通：自分のパスワード変更 */
 function actChangePassword_(req, auth) {
-  const rows = read_('bands');
+  const kind = auth.role === 'admin' ? 'admins' : 'bands';
+  const rows = read_(kind);
   const row = rows.find(r => r[0] === auth.id);
   if (hash_(String(req.oldPassword || ''), row[3]) !== row[4]) throw userErr_('今のパスワードが違います');
   const pw = String(req.newPassword || '');
@@ -155,13 +160,14 @@ function actChangePassword_(req, auth) {
   row[3] = Utilities.getUuid();
   row[4] = hash_(pw, row[3]);
   row[5] = String(Number(row[5] || 1) + 1);
-  write_('bands', rows);
-  log_(row[1], 'パスワード変更', '');
-  return { token: sign_({ r: 'band', id: row[0], v: row[5] }) };
+  write_(kind, rows);
+  if (kind === 'admins' && getSetting_('initial_admin').indexOf(row[0]) >= 0) setSetting_('initial_admin', '');
+  log_(actor_(auth), 'パスワード変更', '');
+  return { token: sign_({ r: auth.role, id: row[0], v: row[5] }) };
 }
 
 function meOf_(auth) {
-  if (auth.role === 'admin') return { role: 'admin' };
+  if (auth.role === 'admin') return { role: 'admin', admin: { id: auth.admin[0], name: auth.admin[1] } };
   return { role: 'band', band: { id: auth.band[0], name: auth.band[1] } };
 }
 
@@ -205,7 +211,7 @@ function actSaveRequests_(req, auth) {
     rows.push([m, auth.id, p[0], PERIODS[p[1]], String(i + 1), now]);
   });
   write_('requests', rows);
-  log_(auth.band[1], '希望提出', m + ' ' + list.length + '件');
+  log_(actor_(auth), '希望提出', m + ' ' + list.length + '件');
   return { saved: list.length, updated: now };
 }
 
@@ -240,7 +246,7 @@ function actAdminMonth_(req) {
   };
 }
 
-function actSaveMonth_(req) {
+function actSaveMonth_(req, auth) {
   const m = checkMonth_(req.month);
   const cur = monthInfo_(m);
   let status = String(req.status || '準備中');
@@ -268,11 +274,11 @@ function actSaveMonth_(req) {
   write_('months', monthRows);
   const open = openSet_(m);
   const warn = read_('allocs').filter(r => r[0] === m && !open.has(r[1] + '|' + PERIOD_FROM_JA[r[2]])).length;
-  log_('管理者', '月設定保存', m + ' ' + status);
+  log_(actor_(auth), '月設定保存', m + ' ' + status);
   return { info: monthInfo_(m), closedButAllocated: warn };
 }
 
-function actRunAllocation_(req) {
+function actRunAllocation_(req, auth) {
   const m = checkMonth_(req.month);
   const all = read_('allocs');
   if (all.some(r => r[0] === m && r[4] === '確定')) throw userErr_('この月は確定済みです。やり直すときは先に「確定を取り消す」を押してください');
@@ -293,11 +299,11 @@ function actRunAllocation_(req) {
   // 割り当て後に希望が変わらないよう、受付中なら締切にする
   const info = monthInfo_(m);
   if (info.rawStatus === '受付中' || info.rawStatus === '準備中') setMonthStatus_(m, '締切');
-  log_('管理者', '自動割り当て', m + ' ' + result.length + '枠');
+  log_(actor_(auth), '自動割り当て', m + ' ' + result.length + '枠');
   return { count: result.length };
 }
 
-function actSetSlot_(req) {
+function actSetSlot_(req, auth) {
   const m = checkMonth_(req.month);
   const day = String(req.day || '');
   const period = String(req.period || '');
@@ -317,11 +323,11 @@ function actSetSlot_(req) {
     rows.push([m, day, PERIODS[period], bandId, state, '手動', rq ? rq[4] : '', nowStr_()]);
   }
   write_('allocs', rows);
-  log_('管理者', '枠の手動変更', slot + ' → ' + (bandId ? (bandNames_()[bandId] || bandId) : 'なし') + '（' + state + '）');
+  log_(actor_(auth), '枠の手動変更', slot + ' → ' + (bandId ? (bandNames_()[bandId] || bandId) : 'なし') + '（' + state + '）');
   return { state: state };
 }
 
-function actConfirm_(req) {
+function actConfirm_(req, auth) {
   const m = checkMonth_(req.month);
   const rows = read_('allocs');
   const target = rows.filter(r => r[0] === m && r[4] === '仮');
@@ -331,22 +337,22 @@ function actConfirm_(req) {
   target.forEach(r => { r[4] = '確定'; });
   write_('allocs', rows);
   setMonthStatus_(m, '確定');
-  log_('管理者', '一括確定', m + ' ' + target.length + '枠');
+  log_(actor_(auth), '一括確定', m + ' ' + target.length + '枠');
   return { count: target.length };
 }
 
-function actUnconfirm_(req) {
+function actUnconfirm_(req, auth) {
   const m = checkMonth_(req.month);
   const rows = read_('allocs');
   let n = 0;
   rows.forEach(r => { if (r[0] === m && r[4] === '確定') { r[4] = '仮'; n++; } });
   write_('allocs', rows);
   setMonthStatus_(m, '締切');
-  log_('管理者', '確定取り消し', m + ' ' + n + '枠');
+  log_(actor_(auth), '確定取り消し', m + ' ' + n + '枠');
   return { count: n };
 }
 
-function actUpdateBand_(req) {
+function actUpdateBand_(req, auth) {
   const rows = read_('bands');
   const row = rows.find(r => r[0] === String(req.bandId || ''));
   if (!row) throw userErr_('バンドが見つかりません');
@@ -372,15 +378,63 @@ function actUpdateBand_(req) {
     done.push('状態→' + req.status);
   }
   write_('bands', rows);
-  if (done.length) log_('管理者', 'バンド編集', row[1] + '：' + done.join('、'));
+  if (done.length) log_(actor_(auth), 'バンド編集', row[1] + '：' + done.join('、'));
   return { done: done };
 }
 
-function actGetSettings_() {
-  return { passphrase: getSetting_('passphrase'), historyMonths: historyMonths_() };
+function actGetSettings_(req, auth) {
+  return {
+    passphrase: getSetting_('passphrase'), historyMonths: historyMonths_(), myId: auth.id,
+    admins: read_('admins').map(r => ({ id: r[0], name: r[1], status: r[6], created: r[7] })),
+  };
 }
 
-function actSaveSettings_(req) {
+function actAddAdmin_(req, auth) {
+  const name = cleanName_(req.name);
+  const key = normKey_(name);
+  const pw = String(req.password || '');
+  checkPassword_(pw);
+  const rows = read_('admins');
+  if (rows.some(r => r[2] === key)) throw userErr_('その名前の管理者はすでにいます');
+  const salt = Utilities.getUuid();
+  rows.push(['a_' + Utilities.getUuid().replace(/-/g, '').slice(0, 12), name, key, salt, hash_(pw, salt), '1', '有効', nowStr_()]);
+  write_('admins', rows);
+  log_(actor_(auth), '管理者追加', name);
+  return { name: name };
+}
+
+function actUpdateAdmin_(req, auth) {
+  const rows = read_('admins');
+  const row = rows.find(r => r[0] === String(req.adminId || ''));
+  if (!row) throw userErr_('管理者が見つかりません');
+  const done = [];
+  if (req.password) {
+    checkPassword_(String(req.password));
+    row[3] = Utilities.getUuid();
+    row[4] = hash_(String(req.password), row[3]);
+    row[5] = String(Number(row[5] || 1) + 1);
+    done.push('パスワードリセット');
+  }
+  if (req.status && req.status !== row[6]) {
+    if (['有効', '停止'].indexOf(req.status) < 0) throw userErr_('状態の値が正しくありません');
+    if (req.status === '停止') {
+      if (row[0] === auth.id) throw userErr_('自分自身は停止できません');
+      if (rows.filter(r => r[6] === '有効').length <= 1) throw userErr_('最後の管理者は停止できません');
+    }
+    row[6] = req.status;
+    row[5] = String(Number(row[5] || 1) + 1);
+    done.push(req.status === '停止' ? '停止' : '再開');
+  }
+  write_('admins', rows);
+  if (done.length) log_(actor_(auth), '管理者編集', row[1] + '：' + done.join('、'));
+  return { done: done };
+}
+
+function actor_(auth) {
+  return auth.role === 'admin' ? '管理者:' + auth.admin[1] : auth.band[1];
+}
+
+function actSaveSettings_(req, auth) {
   const res = {};
   if (req.passphrase != null) {
     const p = String(req.passphrase).trim();
@@ -392,17 +446,7 @@ function actSaveSettings_(req) {
     if (!(n >= 1 && n <= 24 && Math.floor(n) === n)) throw userErr_('履歴の月数は1〜24で入力してください');
     setSetting_('history_months', String(n));
   }
-  if (req.adminPassword) {
-    checkPassword_(String(req.adminPassword));
-    const salt = Utilities.getUuid();
-    setSetting_('admin_salt', salt);
-    setSetting_('admin_hash', hash_(String(req.adminPassword), salt));
-    const v = String(Number(getSetting_('admin_ver') || 1) + 1);
-    setSetting_('admin_ver', v);
-    setSetting_('initial_admin_password', '');
-    res.token = sign_({ r: 'admin', id: 'admin', v: v });
-  }
-  log_('管理者', '設定変更', Object.keys(req).filter(k => ['passphrase', 'historyMonths', 'adminPassword'].indexOf(k) >= 0 && req[k] != null && req[k] !== '').join(','));
+  log_(actor_(auth), '設定変更', Object.keys(req).filter(k => ['passphrase', 'historyMonths'].indexOf(k) >= 0 && req[k] != null && req[k] !== '').join(','));
   return res;
 }
 
@@ -579,8 +623,9 @@ function verifyToken_(token) {
     const p = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString('UTF-8'));
     if (!p.exp || p.exp < Date.now()) return null;
     if (p.r === 'admin') {
-      if (String(getSetting_('admin_ver') || '1') !== String(p.v)) return null;
-      return { role: 'admin' };
+      const row = read_('admins').find(r => r[0] === p.id);
+      if (!row || row[6] !== '有効' || row[5] !== String(p.v)) return null;
+      return { role: 'admin', id: row[0], admin: row };
     }
     if (p.r === 'band') {
       const row = read_('bands').find(r => r[0] === p.id);
@@ -706,14 +751,8 @@ function setup() {
   });
   MEMO = {};
   let msg = [];
-  if (!getSetting_('admin_hash')) {
-    const pw = 'adm-' + Utilities.getUuid().replace(/-/g, '').slice(0, 10);
-    const salt = Utilities.getUuid();
-    setSetting_('admin_salt', salt);
-    setSetting_('admin_hash', hash_(pw, salt));
-    setSetting_('admin_ver', String(Date.now()));
-    setSetting_('initial_admin_password', pw);
-    msg.push('初期の管理者パスワード：' + pw);
+  if (!read_('admins').some(r => r[6] === '有効')) {
+    msg.push(createFirstAdmin_());
   }
   if (!getSetting_('passphrase')) {
     const p = 'keion' + String(Math.floor(1000 + Math.random() * 9000));
@@ -724,4 +763,30 @@ function setup() {
   msg.push('初期設定が完了しました。「設定」シートにも書いてあります。');
   Logger.log(msg.join('\n'));
   return msg.join('\n');
+}
+
+/** 最初の管理者（部長）を作る。setup と recoverAdmin から呼ばれる */
+function createFirstAdmin_() {
+  const rows = read_('admins');
+  let name = '部長', n = 2;
+  while (rows.some(r => r[2] === normKey_(name))) name = '部長' + (n++);
+  const pw = 'adm-' + Utilities.getUuid().replace(/-/g, '').slice(0, 10);
+  const salt = Utilities.getUuid();
+  const id = 'a_' + Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+  rows.push([id, name, normKey_(name), salt, hash_(pw, salt), '1', '有効', nowStr_()]);
+  write_('admins', rows);
+  setSetting_('initial_admin', '名前：' + name + ' / パスワード：' + pw + ' (' + id + ')');
+  return '管理者ログイン → 名前：' + name + ' ／ パスワード：' + pw;
+}
+
+/**
+ * 管理者が全員パスワードを忘れたときの非常用。
+ * Apps Script の画面で関数「recoverAdmin」を選んで ▶実行 すると、新しい管理者が1人作られます。
+ */
+function recoverAdmin() {
+  MEMO = {};
+  const m = createFirstAdmin_();
+  log_('Apps Script', '管理者の復旧', m.split('／')[0]);
+  Logger.log(m);
+  return m;
 }

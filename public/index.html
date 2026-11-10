@@ -49,8 +49,10 @@
       <button type="submit" class="primary wide">登録する</button>
     </form>
     <form class="card hidden" id="adminForm">
-      <h2>管理者ログイン</h2>
-      <label for="adminPw">管理者パスワード</label>
+      <h2>管理者（幹部）ログイン</h2>
+      <label for="adminName">名前</label>
+      <input id="adminName" name="username" autocomplete="username" maxlength="40" required>
+      <label for="adminPw">パスワード</label>
       <input id="adminPw" type="password" autocomplete="current-password" required>
       <button type="submit" class="primary wide">ログイン</button>
     </form>

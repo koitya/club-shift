@@ -96,10 +96,10 @@ function render() {
   $('authView').classList.toggle('hidden', logged);
   $('mainView').classList.toggle('hidden', !logged);
   $('logoutBtn').classList.toggle('hidden', !logged);
-  $('who').textContent = !logged ? '未ログイン' : S.me.role === 'admin' ? '管理者でログイン中' : S.me.band.name;
+  $('who').textContent = !logged ? '未ログイン' : S.me.role === 'admin' ? '管理者：' + S.me.admin.name : S.me.band.name;
   if (!logged) return;
   const tabs = S.me.role === 'admin'
-    ? [['shift', '📅', 'シフト'], ['admin', '🛠', '管理']]
+    ? [['shift', '📅', 'シフト'], ['admin', '🛠', '管理'], ['account', '👤', 'アカウント']]
     : [['shift', '📅', 'シフト'], ['request', '✋', '希望提出'], ['account', '👤', 'アカウント']];
   if (!tabs.some(t => t[0] === S.tab)) S.tab = 'shift';
   $('tabs').innerHTML = tabs.map(t => `<button data-tab="${t[0]}" class="${S.tab === t[0] ? 'on' : ''}"><span class="ic">${t[1]}</span>${t[2]}</button>`).join('');
@@ -137,7 +137,7 @@ function bindAuth() {
   };
   $('adminForm').onsubmit = async e => {
     e.preventDefault();
-    try { const r = await api('adminLogin', { password: $('adminPw').value }); loggedIn(r); } catch (_) {}
+    try { const r = await api('adminLogin', { name: $('adminName').value, password: $('adminPw').value }); loggedIn(r); } catch (_) {}
   };
 }
 function loggedIn(r) {
@@ -292,7 +292,8 @@ function drawRequest() {
 
 /* ---------- アカウント（バンド） ---------- */
 function pageAccount() {
-  $('page').innerHTML = `<div class="card"><h2>${esc(S.me.band.name)}</h2><p class="hint">バンド名の変更は管理者に頼んでください。</p></div>
+  const isAdmin = S.me.role === 'admin';
+  $('page').innerHTML = `<div class="card"><h2>${esc(isAdmin ? S.me.admin.name : S.me.band.name)}</h2><p class="hint">${isAdmin ? '管理者アカウントです。自分のバンドの希望を出すときは、一度ログアウトしてバンドでログインしてください。' : 'バンド名の変更は管理者に頼んでください。'}</p></div>
   <form class="card" id="pwForm"><h2>パスワード変更</h2>
   <label for="oldPw">今のパスワード</label><input id="oldPw" type="password" autocomplete="current-password" required>
   <label for="newPw">新しいパスワード（8文字以上）</label><input id="newPw" type="password" autocomplete="new-password" minlength="8" required>
@@ -339,7 +340,7 @@ function drawAdmin() {
   const submitted = active.filter(b => b.requests.length);
   const confirmed = d.allocs.some(a => a.status === '確定');
   const drafts = d.allocs.filter(a => a.status === '仮');
-  let html = monthBar('admin');
+  let html = monthBar('admin', `<div class="row" style="margin:-4px 0 12px"><button class="small" id="adminRefresh">🔄 最新に更新</button></div>`);
   html += `<div class="stat"><div><b>${esc(info.status)}</b><span>状態</span></div><div><b>${submitted.length}/${active.length}</b><span>提出バンド</span></div><div><b>${d.allocs.length}</b><span>割り当て枠</span></div></div>`;
 
   // ① 月の準備
@@ -413,6 +414,7 @@ function drawAdmin() {
 function bindAdmin() {
   const m = AD.info.month;
   bindMonthBar('admin', () => pageAdmin());
+  $('adminRefresh').onclick = async () => { await pageAdmin(true); toast('最新の状態にしました'); };
   document.querySelectorAll('details[data-sec]').forEach(el => el.addEventListener('toggle', () => {
     S.adminOpen[el.dataset.sec] = el.open;
     if (el.dataset.sec === 'settings' && el.open) loadSettings();
@@ -485,23 +487,49 @@ function bindAdmin() {
 }
 function keepDraw() { const y = window.scrollY; captureForm(); drawAdmin(); window.scrollTo(0, y); }
 
+let ST = null, editAdmin = null;
 async function loadSettings() {
   const box = $('settingsBody'); if (!box) return;
-  let s; try { s = await api('getSettings'); } catch (e) { return; }
+  try { ST = await api('getSettings'); } catch (e) { return; }
+  drawSettings();
+}
+function drawSettings() {
+  const box = $('settingsBody'); if (!box || !ST) return;
+  const s = ST;
   box.innerHTML = `<label for="sPhrase">部の合言葉（バンド登録に必要）</label><input id="sPhrase" value="${esc(s.passphrase)}">
     <label for="sHist">公平性で数える過去の月数</label><input id="sHist" type="number" min="1" max="24" value="${esc(s.historyMonths)}">
     <button class="primary wide" id="saveSet">保存</button>
-    <h3>管理者パスワードの変更</h3><p class="hint" style="margin:0">管理者が交代したら変更してください。他の端末の管理者ログインは解除されます。</p>
-    <label for="sAdm">新しい管理者パスワード（8文字以上）</label><input id="sAdm" type="password" autocomplete="new-password">
-    <label for="sAdm2">確認</label><input id="sAdm2" type="password" autocomplete="new-password">
-    <button class="wide" id="saveAdm">管理者パスワードを変更</button>`;
+    <h3>管理者（幹部）一覧</h3>
+    <ul class="list">${s.admins.map(a => `<li><div class="line"><span class="nm">${esc(a.name)}${a.id === s.myId ? '（自分）' : ''}</span><span>${a.status === '有効' ? '' : '<span class="pill ng">停止中</span> '}<button class="small" data-aedit="${esc(a.id)}">編集</button></span></div>` +
+      (editAdmin === a.id ? `<div class="editbox"><label>新しいパスワード（リセットするときだけ）</label><input id="eaPw" type="text" autocomplete="off" placeholder="8文字以上">
+        <div class="row" style="margin-top:10px"><button class="primary" data-asave="${esc(a.id)}">パスワードを保存</button>${a.id === s.myId ? '' : `<button class="${a.status === '有効' ? 'danger' : ''}" data-astop="${esc(a.id)}">${a.status === '有効' ? '停止する' : '再開する'}</button>`}</div>
+        <p class="hint">自分のパスワードは「👤 アカウント」からも変えられます。引退した幹部は停止してください。</p></div>` : '') + '</li>').join('')}</ul>
+    <h3>管理者を追加</h3>
+    <label for="naName">名前（ログインに使う）</label><input id="naName" maxlength="40">
+    <label for="naPw">仮パスワード（8文字以上・本人に伝える）</label><input id="naPw" type="text" autocomplete="off">
+    <button class="wide" id="addAdmin">追加する</button>`;
   $('saveSet').onclick = async () => {
     try { await api('saveSettings', { passphrase: $('sPhrase').value, historyMonths: Number($('sHist').value) }); toast('設定を保存しました'); } catch (e) {}
   };
-  $('saveAdm').onclick = async () => {
-    if ($('sAdm').value !== $('sAdm2').value) return toast('確認用が一致しません', true);
-    try { const r = await api('saveSettings', { adminPassword: $('sAdm').value }); if (r.token) setToken(r.token); $('sAdm').value = $('sAdm2').value = ''; toast('管理者パスワードを変更しました'); } catch (e) {}
+  $('addAdmin').onclick = async () => {
+    if ($('naPw').value.length < 8) return toast('仮パスワードは8文字以上にしてください', true);
+    try { const r = await api('addAdmin', { name: $('naName').value, password: $('naPw').value }); toast(r.name + ' を管理者に追加しました。名前と仮パスワードを本人に伝えてください'); loadSettings(); } catch (e) {}
   };
+  box.querySelectorAll('[data-aedit]').forEach(b => b.onclick = () => { editAdmin = editAdmin === b.dataset.aedit ? null : b.dataset.aedit; drawSettings(); });
+  box.querySelectorAll('[data-asave]').forEach(b => b.onclick = async () => {
+    const pw = $('eaPw').value.trim();
+    if (pw.length < 8) return toast('パスワードは8文字以上にしてください', true);
+    try {
+      await api('updateAdmin', { adminId: b.dataset.asave, password: pw });
+      if (b.dataset.asave === ST.myId) { toast('自分のパスワードを変えたので、もう一度ログインしてください'); setToken(null); S.me = null; render(); return; }
+      toast('パスワードをリセットしました。本人に伝えてください'); editAdmin = null; loadSettings();
+    } catch (e) {}
+  });
+  box.querySelectorAll('[data-astop]').forEach(b => b.onclick = async () => {
+    const a = ST.admins.find(x => x.id === b.dataset.astop), to = a.status === '有効' ? '停止' : '有効';
+    if (!confirm(a.name + ' を' + (to === '停止' ? '停止' : '再開') + 'しますか？')) return;
+    try { await api('updateAdmin', { adminId: a.id, status: to }); toast(to === '停止' ? '停止しました' : '再開しました'); editAdmin = null; loadSettings(); } catch (e) {}
+  });
 }
 
 boot();
